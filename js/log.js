@@ -24,6 +24,7 @@ export class Archive {
     this.byHash = new Map();
     this.galleries = new Map();
     this.members = new Map();
+    this.arrangement = new Map(); // galleryId -> [mediaId, ...] custom order
     this.favorites = new Set();
     this.tags = new Map();      // mediaId -> Set(tag key)
     this.tagNames = new Map();  // tag key -> display name
@@ -98,11 +99,18 @@ export class Archive {
       }
       case 'gallery.delete': {
         const g = this.galleries.get(op.id);
-        if (g) { g.deleted = true; this.members.delete(op.id); }
+        if (g) { g.deleted = true; this.members.delete(op.id); this.arrangement.delete(op.id); }
         break;
       }
       case 'gallery.reorder':
         (op.ids || []).forEach((id, i) => { const g = this.galleries.get(id); if (g) g.order = i; });
+        break;
+      case 'gallery.arrange':
+        // Full custom order for a gallery; an empty list clears it.
+        if (this.galleries.has(op.id)) {
+          if (op.media && op.media.length) this.arrangement.set(op.id, op.media.slice());
+          else this.arrangement.delete(op.id);
+        }
         break;
       case 'membership.add':
       case 'membership.remove': {
@@ -310,6 +318,19 @@ export class Archive {
   links() {
     return [...this.posts.values()].filter(p => !p.deleted && p.via === 'link' && !p.media.length)
       .sort((a, b) => b.savedAt - a.savedAt);
+  }
+
+  hasArrangement(gid) { return !!this.arrangement.get(gid)?.length; }
+
+  // A gallery's images in its custom order. Images added after the last
+  // arrangement come first (newest first), then the arranged ones.
+  arranged(gid, list = this.list({ type: 'gallery', id: gid })) {
+    const order = this.arrangement.get(gid);
+    if (!order || !order.length) return list;
+    const pos = new Map(order.map((id, i) => [id, i]));
+    const fresh = list.filter(m => !pos.has(m.id));
+    const placed = list.filter(m => pos.has(m.id)).sort((a, b) => pos.get(a.id) - pos.get(b.id));
+    return fresh.concat(placed);
   }
 
   galleryList() {

@@ -6,7 +6,7 @@ import { toast, sheet, askText, confirmBox, pickGallery, createGallery, progress
 import { tagKey, cleanTag } from './log.js';
 import { openViewer, labelFor } from './viewer.js';
 
-const VERSION = '0.2.0';
+const VERSION = '0.3.0';
 const app = $('#app');
 const ui = {
   tab: 'capture',
@@ -17,7 +17,9 @@ const ui = {
   source: '',            // sticky source link for capture
   recent: [],            // media ids saved this session
   capTags: [],           // tags applied to the next saves
-  sort: 'new',           // grid order: 'new' | 'old'
+  sort: 'new',           // grid order outside galleries: 'new' | 'old'
+  gsort: {},             // per-gallery order: 'custom' | 'new' | 'old'
+  arranging: null,       // {gid, order, cells, picked, dirty} while arranging a gallery
   lastSync: null,
   syncing: false,
 };
@@ -38,6 +40,7 @@ async function enterApp() {
   ui.source = (await idb.get('kv', 'lastSource')) || '';
   ui.capTags = (await idb.get('kv', 'capTags')) || [];
   ui.sort = (await idb.get('kv', 'sort')) || 'new';
+  ui.gsort = (await idb.get('kv', 'gsort')) || {};
   S.archive.onChange(() => scheduleRender());
   renderMain();
   syncNow();
@@ -230,7 +233,7 @@ function renderMain({ keepScroll = false } = {}) {
 
 function tabBar() {
   const tab = (id, ic, label) => h('button', { class: 'tab' + (ui.tab === id ? ' on' : ''), onclick: () => {
-    if (ui.tab === id && id === 'library') { ui.libStack = []; ui.selecting = null; }
+    if (ui.tab === id && id === 'library') { ui.libStack = []; ui.selecting = null; ui.arranging = null; }
     ui.tab = id; ui.editing = false; renderMain();
   } }, icon(ic, 24), h('span', null, label));
   return h('nav', { class: 'tabs' }, tab('library', 'library', 'Library'), tab('capture', 'clip', 'Save'), tab('settings', 'gear', 'Settings'));
@@ -378,8 +381,12 @@ function gridView() {
     top.key = 'tags:' + top.filter.tags.join(',');
   }
   const title = filterTitle(top);
+  const gid = top.filter.type === 'gallery' ? top.filter.id : null;
+  if (gid && ui.arranging?.gid === gid) return arrangeView(top);
+  const mode = gid ? galleryMode(gid) : ui.sort;
   let list = A.list(top.filter);
-  if (ui.sort === 'old') list = list.slice().reverse();
+  if (mode === 'custom') list = A.arranged(gid, list);
+  else if (mode === 'old') list = list.slice().reverse();
   const sel = ui.selecting;
   const back = () => { ui.libStack.pop(); ui.selecting = null; renderMain(); };
 
@@ -418,7 +425,9 @@ function gridView() {
         renderMain({ keepScroll: true });
       } }, list.every(m => sel.has(m.id)) ? 'Deselect all' : 'Select all'),
       h('button', { class: 'link-btn', onclick: () => { ui.selecting = null; renderMain({ keepScroll: true }); } }, 'Cancel')]
-    : [list.length > 1 ? h('button', { class: 'icon-btn', 'aria-label': ui.sort === 'old' ? 'Showing oldest first' : 'Showing newest first', onclick: async () => {
+    : [gid ? h('button', { class: 'icon-btn', 'aria-label': 'Order and arrange', onclick: () => orderSheet(gid, list) },
+        icon(mode === 'custom' ? 'arrange' : mode === 'old' ? 'sortUp' : 'sortDown')) : null,
+      !gid && list.length > 1 ? h('button', { class: 'icon-btn', 'aria-label': ui.sort === 'old' ? 'Showing oldest first' : 'Showing newest first', onclick: async () => {
         ui.sort = ui.sort === 'old' ? 'new' : 'old';
         await idb.put('kv', 'sort', ui.sort);
         toast(ui.sort === 'old' ? 'Oldest first' : 'Newest first', { ms: 1200 });
@@ -450,11 +459,205 @@ function gridView() {
 
   const content = [
     tagBar,
-    h('div', { class: 'grid-meta muted' }, `${list.length} image${list.length === 1 ? '' : 's'}${list.length > 1 ? ' · ' + (ui.sort === 'old' ? 'oldest first' : 'newest first') : ''}`),
+    h('div', { class: 'grid-meta muted' }, `${list.length} image${list.length === 1 ? '' : 's'}${list.length > 1 ? ' · ' + MODE_LABEL[mode] : ''}`),
     list.length ? grid : h('div', { class: 'empty-state' }, h('p', null, 'Nothing here yet.')),
   ];
   const footer = sel ? selectionBar(top) : null;
   return [topBar(title, { back, actions }), content, footer];
+}
+
+const MODE_LABEL = { custom: 'your order', new: 'newest first', old: 'oldest first' };
+
+function galleryMode(gid) {
+  return ui.gsort[gid] || (S.archive.hasArrangement(gid) ? 'custom' : ui.sort);
+}
+async function setGalleryMode(gid, mode) {
+  ui.gsort = { ...ui.gsort, [gid]: mode };
+  await idb.put('kv', 'gsort', ui.gsort);
+}
+
+function orderSheet(gid, list) {
+  const A = S.archive;
+  const mode = galleryMode(gid);
+  const has = A.hasArrangement(gid);
+  const row = (m, label, sub) => h('button', { class: 'row' + (mode === m ? ' checked' : ''), disabled: m === 'custom' && !has,
+    onclick: async () => { await setGalleryMode(gid, m); close(); renderMain(); } },
+    h('span', { class: 'grow' }, label, sub ? h('div', { class: 'muted tiny' }, sub) : null), mode === m ? icon('check', 20) : null);
+  let close;
+  sheet(c => {
+    close = c;
+    return [
+      h('button', { class: 'btn primary block', disabled: list.length < 2, onclick: () => {
+        c();
+        ui.arranging = { gid, order: list.map(m => m.id), cells: new Map(), picked: null, dirty: false };
+        renderMain();
+      } }, icon('arrange', 18), ' Arrange images'),
+      h('div', { class: 'label' }, 'Show this gallery in'),
+      h('div', { class: 'pick-list' },
+        row('custom', 'Your order', has ? null : 'Arrange images first'),
+        row('new', 'Newest first'),
+        row('old', 'Oldest first')),
+    ];
+  }, { title: 'Order' });
+}
+
+// Arrange mode: tap two images to swap them; touch and hold to drag one to a new spot.
+function arrangeView(top) {
+  const A = S.archive;
+  const st = ui.arranging;
+  const gid = st.gid;
+  const live = new Map(A.list(top.filter).map(m => [m.id, m]));
+  st.order = st.order.filter(id => live.has(id));
+  const grid = h('div', { class: 'grid arranging' });
+
+  const cellFor = id => {
+    let c = st.cells.get(id);
+    if (!c) {
+      c = thumbEl(live.get(id), 'cell');
+      c.dataset.id = id;
+      c.append(h('span', { class: 'pos' }));
+      st.cells.set(id, c);
+    }
+    c.classList.toggle('picked', st.picked === id);
+    return c;
+  };
+  const renumber = () => st.order.forEach((id, i) => { const c = st.cells.get(id); if (c) c.querySelector('.pos').textContent = i + 1; });
+  const layout = () => { grid.replaceChildren(...st.order.map(cellFor)); renumber(); };
+  layout();
+
+  const finish = async (save) => {
+    if (save && st.dirty) {
+      await A.commit([{ op: 'gallery.arrange', id: gid, media: st.order }]);
+      await setGalleryMode(gid, 'custom');
+      toast('Order saved', { kind: 'ok' });
+    }
+    ui.arranging = null;
+    renderMain();
+  };
+  const pick = id => {
+    if (!st.picked) st.picked = id;
+    else if (st.picked === id) st.picked = null;
+    else {
+      const a = st.order.indexOf(st.picked), b = st.order.indexOf(id);
+      [st.order[a], st.order[b]] = [st.order[b], st.order[a]];
+      st.picked = null; st.dirty = true;
+      layout();
+      for (const x of [st.cells.get(st.order[a]), st.cells.get(st.order[b])]) { x.classList.remove('flash'); void x.offsetWidth; x.classList.add('flash'); }
+    }
+    for (const [cid, c] of st.cells) c.classList.toggle('picked', st.picked === cid);
+    renderBar();
+  };
+  const moveTo = where => {
+    const id = st.picked; if (!id) return;
+    st.order = st.order.filter(x => x !== id);
+    where === 'start' ? st.order.unshift(id) : st.order.push(id);
+    st.picked = null; st.dirty = true;
+    layout(); renderBar();
+    st.cells.get(id).scrollIntoView({ block: 'center', behavior: 'smooth' });
+  };
+
+  // ---- drag (touch and hold) ----
+  let press = null, drag = null, justDragged = false;
+  const content = () => $('.content');
+  const startDrag = (cell, x, y) => {
+    press = null;
+    const r = cell.getBoundingClientRect();
+    const ghost = cell.cloneNode(true);
+    ghost.classList.add('ghost');
+    Object.assign(ghost.style, { width: r.width + 'px', height: r.height + 'px', left: (x - r.width / 2) + 'px', top: (y - r.height / 2) + 'px' });
+    document.body.append(ghost);
+    cell.classList.add('dragging');
+    st.picked = null;
+    for (const c of st.cells.values()) c.classList.remove('picked');
+    drag = { cell, ghost, x, y, w: r.width, h: r.height, raf: 0 };
+    if (navigator.vibrate) navigator.vibrate(10);
+    const tick = () => {
+      if (!drag) return;
+      const cr = content().getBoundingClientRect();
+      const edge = 70;
+      let v = 0;
+      if (drag.y < cr.top + edge) v = -Math.ceil((cr.top + edge - drag.y) / 6);
+      else if (drag.y > cr.bottom - edge) v = Math.ceil((drag.y - (cr.bottom - edge)) / 6);
+      if (v) { content().scrollTop += v; hover(drag.x, drag.y); }
+      drag.raf = requestAnimationFrame(tick);
+    };
+    drag.raf = requestAnimationFrame(tick);
+    renderBar();
+  };
+  const hover = (x, y) => {
+    const el = document.elementFromPoint(x, y)?.closest?.('.grid.arranging .cell');
+    if (!el || el === drag.cell) return;
+    const kids = [...grid.children];
+    if (kids.indexOf(drag.cell) < kids.indexOf(el)) el.after(drag.cell); else el.before(drag.cell);
+    st.order = [...grid.children].map(c => c.dataset.id);
+    st.dirty = true;
+    renumber();
+  };
+  const moveDrag = (x, y) => {
+    drag.x = x; drag.y = y;
+    drag.ghost.style.left = (x - drag.w / 2) + 'px';
+    drag.ghost.style.top = (y - drag.h / 2) + 'px';
+    hover(x, y);
+  };
+  const endDrag = () => {
+    cancelAnimationFrame(drag.raf);
+    drag.ghost.remove();
+    drag.cell.classList.remove('dragging');
+    drag = null;
+    justDragged = true; setTimeout(() => { justDragged = false; }, 350);
+    renderBar();
+  };
+  grid.addEventListener('touchstart', e => {
+    const cell = e.target.closest('.cell');
+    if (!cell || e.touches.length !== 1) return;
+    const t = e.touches[0];
+    press = { cell, x: t.clientX, y: t.clientY, timer: setTimeout(() => press && startDrag(cell, press.x, press.y), 300) };
+  }, { passive: true });
+  grid.addEventListener('touchmove', e => {
+    const t = e.touches[0];
+    if (drag) { e.preventDefault(); moveDrag(t.clientX, t.clientY); return; }
+    if (press && Math.hypot(t.clientX - press.x, t.clientY - press.y) > 8) { clearTimeout(press.timer); press = null; }
+  }, { passive: false });
+  const release = e => {
+    if (press) { clearTimeout(press.timer); press = null; }
+    if (drag) { e.preventDefault(); endDrag(); }
+  };
+  grid.addEventListener('touchend', release);
+  grid.addEventListener('touchcancel', release);
+  grid.addEventListener('contextmenu', e => e.preventDefault());
+  grid.addEventListener('click', e => {
+    const cell = e.target.closest('.cell');
+    if (!cell || justDragged) return;
+    pick(cell.dataset.id);
+  });
+
+  const bar = h('nav', { class: 'selbar arrange-bar' });
+  const renderBar = () => {
+    bar.replaceChildren(...(st.picked
+      ? [h('span', { class: 'sel-count' }, 'Tap another to swap'),
+         h('button', { class: 'link-btn', onclick: () => moveTo('start') }, 'To start'),
+         h('button', { class: 'link-btn', onclick: () => moveTo('end') }, 'To end'),
+         h('button', { class: 'icon-btn', 'aria-label': 'Cancel swap', onclick: () => pick(st.picked) }, icon('close', 20))]
+      : [h('span', { class: 'sel-count' }, drag ? 'Drop it where you want it' : 'Tap two images to swap them · hold and drag to move one')]));
+  };
+  renderBar();
+
+  const g = A.galleries.get(gid);
+  const body = [
+    h('div', { class: 'grid-meta muted' }, `${g.name} · ${st.order.length} images`),
+    grid,
+    A.hasArrangement(gid) ? h('button', { class: 'btn block ghost small', onclick: async () => {
+      if (!(await confirmBox({ title: 'Clear your custom order?', body: 'The gallery goes back to newest first. No images are removed.', ok: 'Clear order' }))) return;
+      await A.commit([{ op: 'gallery.arrange', id: gid, media: [] }]);
+      await setGalleryMode(gid, 'new');
+      ui.arranging = null; renderMain();
+    } }, 'Clear custom order') : null,
+  ];
+  const header = topBar('Arrange', { back: () => finish(false), actions: [
+    h('button', { class: 'link-btn', onclick: () => finish(false) }, 'Cancel'),
+    h('button', { class: 'link-btn strong', onclick: () => finish(true) }, 'Done'),
+  ] });
+  return [header, body, bar];
 }
 
 function selectionBar(top) {
