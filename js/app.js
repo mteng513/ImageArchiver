@@ -1,11 +1,11 @@
 import { h, $, icon, idb, fmtBytes, fmtDate } from './util.js';
 import { S, isSetUp, hasPasscode, createArchive, unlock, lock, parseCode, backupCode, pairingCode,
-  saveImages, deleteMedia, urls, saveB2, testB2, changePasscode, eraseDevice, LIMIT } from './core.js';
+  saveImages, deleteMedia, deletePosts, saveLinkOrImage, urls, saveB2, testB2, changePasscode, eraseDevice, LIMIT } from './core.js';
 import { Store, onStoreEvent, monthDownloads, cachePolicy } from './store.js';
 import { toast, sheet, askText, confirmBox, pickGallery, createGallery, progressBar } from './ui.js';
 import { openViewer, labelFor } from './viewer.js';
 
-const VERSION = '0.1.0';
+const VERSION = '0.1.1';
 const app = $('#app');
 const ui = {
   tab: 'capture',
@@ -212,7 +212,10 @@ function renderMain({ keepScroll = false } = {}) {
   const prev = $('.content');
   const scroll = keepScroll && prev ? prev.scrollTop : 0;
   let header, content, footer;
-  if (ui.tab === 'library') [header, content, footer] = ui.libStack.length ? gridView() : libraryHome();
+  if (ui.tab === 'library') {
+    const top = ui.libStack[ui.libStack.length - 1];
+    [header, content, footer] = !top ? libraryHome() : top.filter.type === 'links' ? linksView() : gridView();
+  }
   else if (ui.tab === 'capture') [header, content] = captureView();
   else [header, content] = settingsView();
   const main = h('main', { class: 'content' }, content);
@@ -286,6 +289,7 @@ function libraryHome() {
     .concat(['x', 'instagram', 'reddit'].map(s => [{ type: 'source', source: s }, labelFor({ source: s }), 'src:' + s]))
     .map(([f, t, k]) => [f, t, k, A.list(f)]).filter(x => x[3].length);
 
+  const links = A.links();
   const content = [
     !all.length ? h('div', { class: 'empty-state' }, icon('photos', 40), h('p', null, 'Nothing saved yet.'),
       h('button', { class: 'btn primary', onclick: () => { ui.tab = 'capture'; renderMain(); } }, 'Save your first image')) : null,
@@ -300,6 +304,9 @@ function libraryHome() {
       } }, 'New'),
       galleries.length ? h('button', { class: 'link-btn', onclick: () => { ui.editing = !ui.editing; renderMain(); } }, ui.editing ? 'Done' : 'Edit') : null),
     galleriesEl,
+    links.length ? h('div', { class: 'section-head' }, h('h3', null, 'Links')) : null,
+    links.length ? h('button', { class: 'list-row', onclick: () => open({ type: 'links' }, 'Saved links', 'links') },
+      icon('link', 20), h('span', { class: 'grow' }, 'Saved links'), h('span', { class: 'muted' }, links.length), icon('back', 16)) : null,
     sources.length ? h('div', { class: 'section-head' }, h('h3', null, 'By source')) : null,
     sources.length ? h('div', { class: 'cards' }, ...sources.map(([f, t, k, l]) => card(t, l, f, k))) : null,
   ];
@@ -310,6 +317,31 @@ async function reorder(galleries, i, d) {
   const ids = galleries.map(g => g.id);
   [ids[i], ids[i + d]] = [ids[i + d], ids[i]];
   await S.archive.commit([{ op: 'gallery.reorder', ids }]);
+}
+
+function linksView() {
+  const A = S.archive;
+  const links = A.links();
+  const back = () => { ui.libStack.pop(); renderMain(); };
+  const rows = links.map(p => {
+    let host = p.sourceURL, path = '';
+    try { const u = new URL(p.sourceURL); host = u.hostname.replace(/^www\./, ''); path = u.pathname + u.search; } catch {}
+    const g = p.gallery && A.galleries.get(p.gallery);
+    return h('div', { class: 'link-item' },
+      h('a', { href: p.sourceURL, target: '_blank', rel: 'noopener noreferrer', class: 'link-main' },
+        h('div', { class: 'link-host' }, labelFor({ source: p.source }) + ' \u00b7 ' + host),
+        h('div', { class: 'link-path' }, path || p.sourceURL),
+        h('div', { class: 'muted tiny' }, fmtDate(p.savedAt), g && !g.deleted ? ' \u00b7 for ' + g.name : '')),
+      h('button', { class: 'icon-btn', 'aria-label': 'Copy link', onclick: async () => { await copy(p.sourceURL); toast('Link copied'); } }, icon('clip', 20)),
+      h('button', { class: 'icon-btn danger', 'aria-label': 'Delete link', onclick: async () => {
+        if (await confirmBox({ title: 'Delete this link?', ok: 'Delete', danger: true })) await deletePosts([p.id]);
+      } }, icon('trash', 20)));
+  });
+  const content = [
+    h('p', { class: 'muted small' }, 'Links you pasted. A later step (the Mac helper) will fetch their images into the gallery you picked. To save a picture now, open the link and use Copy Image.'),
+    rows.length ? h('div', null, rows) : h('div', { class: 'empty-state' }, h('p', null, 'No saved links.')),
+  ];
+  return [topBar('Saved links', { back }), content];
 }
 
 const PAGE = 180;
@@ -401,6 +433,21 @@ function selectionBar(top) {
 }
 
 // ---------------------------------------------------------------- capture
+const pasteLog = [];   // recent paste attempts, shown under "What happened?"
+function logPaste(entry) {
+  pasteLog.unshift({ at: new Date().toLocaleTimeString(), ...entry });
+  pasteLog.length = Math.min(pasteLog.length, 8);
+  const el = $('.paste-log'); if (el) el.replaceChildren(...pasteLogRows());
+}
+function pasteLogRows() {
+  if (!pasteLog.length) return [h('div', null, 'No paste attempts yet.')];
+  return pasteLog.map(e => h('div', { class: 'log-row' }, `${e.at} · ${e.via} · ${e.msg}`));
+}
+function setStatus(msg) {
+  ui.capStatus = msg;
+  const el = $('.cap-status'); if (el) el.textContent = msg;
+}
+
 function captureView() {
   const A = S.archive;
   const galleries = A.galleryList();
@@ -413,24 +460,19 @@ function captureView() {
       if (name) setGallery(await createGallery(name));
     } }, '+ New'));
 
-  const srcInput = h('input', { class: 'field', type: 'url', placeholder: 'Source link (optional, kept until cleared)', value: ui.source,
-    autocapitalize: 'off', autocomplete: 'off', onchange: e => { ui.source = e.target.value.trim(); idb.put('kv', 'lastSource', ui.source); } });
-  const srcRow = h('div', { class: 'src-row' }, srcInput,
-    h('button', { class: 'icon-btn', 'aria-label': 'Paste link', onclick: async () => {
-      try {
-        const t = (await navigator.clipboard.readText()).trim();
-        if (!/^https?:\/\//.test(t)) return toast('Clipboard doesn’t have a link');
-        ui.source = t; srcInput.value = t; idb.put('kv', 'lastSource', t);
-      } catch { toast('Couldn’t read the clipboard'); }
-    } }, icon('link')),
-    ui.source ? h('button', { class: 'icon-btn', 'aria-label': 'Clear link', onclick: () => { ui.source = ''; idb.put('kv', 'lastSource', ''); renderMain({ keepScroll: true }); } }, icon('close', 18)) : null);
-
-  const status = h('div', { class: 'cap-status' });
+  const status = h('div', { class: 'cap-status', 'aria-live': 'polite' }, ui.capStatus || '');
   const bar = progressBar();
   bar.el.hidden = true;
 
-  const pasteBtn = h('button', { class: 'paste-btn', onclick: () => pasteFromClipboard(status) },
-    icon('clip', 34), h('span', { class: 'big' }, 'Paste image'), h('span', { class: 'small' }, 'Copy Image in Chrome, then tap here'));
+  const pasteBtn = h('button', { class: 'paste-btn', onclick: () => pasteFromClipboard() },
+    icon('clip', 34), h('span', { class: 'big' }, 'Paste'),
+    h('span', { class: 'small' }, 'Copy Image (or Copy Link) in Chrome, tap here, then tap the Paste bubble'));
+
+  // Fallback: the system paste menu. Long-press the box and choose Paste.
+  const zone = h('div', { class: 'paste-zone', contenteditable: 'true', inputmode: 'none', role: 'textbox',
+    'aria-label': 'Paste box', autocapitalize: 'off', spellcheck: 'false' });
+  zone.addEventListener('paste', e => onPasteEvent(e, 'box'));
+  zone.addEventListener('input', () => rescueInsertedImages(zone));
 
   const file = h('input', { type: 'file', accept: 'image/*', multiple: true, hidden: true, onchange: async e => {
     const files = [...e.target.files];
@@ -440,80 +482,147 @@ function captureView() {
     const res = await saveImages(files, { via: 'photos', source: 'import', gallery: ui.gallery || null },
       (d, t) => bar.set(d, t, `Saving ${Math.min(d + 1, t)} of ${t}…`));
     bar.el.hidden = true;
-    reportSave(res, status, true);
+    reportSave(res, true);
   } });
+
+  const srcInput = h('input', { class: 'field', type: 'url', placeholder: 'Page link for the next saves (optional)', value: ui.source,
+    autocapitalize: 'off', autocomplete: 'off', onchange: e => { ui.source = e.target.value.trim(); idb.put('kv', 'lastSource', ui.source); } });
+  const srcRow = h('div', { class: 'src-row' }, srcInput,
+    ui.source ? h('button', { class: 'icon-btn', 'aria-label': 'Clear page link', onclick: () => { ui.source = ''; idb.put('kv', 'lastSource', ''); renderMain({ keepScroll: true }); } }, icon('close', 18)) : null);
 
   const usage = A.usage();
   const recent = ui.recent.map(id => A.media.get(id)).filter(m => m && !m.deleted);
   const content = [
     h('div', { class: 'label' }, 'Save to'), chips,
-    srcRow,
     pasteBtn,
+    zone,
+    status,
     h('button', { class: 'btn block', onclick: () => file.click() }, icon('photos', 20), ' Import from Photos'), file,
-    bar.el, status,
+    bar.el,
     recent.length ? h('div', { class: 'section-head' }, h('h3', null, `Saved this session · ${recent.length}`)) : null,
     recent.length ? h('div', { class: 'strip' }, ...recent.slice(0, 24).map((m, i) => {
       const t = thumbEl(m, 'strip-item');
       t.addEventListener('click', () => openViewer(recent, i, { viewKey: 'recent' }));
       return t;
     })) : null,
+    h('details', { class: 'more' }, h('summary', null, 'Page link (optional)'),
+      h('p', { class: 'muted small' }, 'Attached to every image you save until you clear it. Handy when saving several images from one page.'), srcRow),
+    h('details', { class: 'more' }, h('summary', null, 'What happened? (paste log)'),
+      h('div', { class: 'paste-log' }, ...pasteLogRows())),
     h('p', { class: 'muted tiny center' }, `${fmtBytes(usage)} of 9 GB used`, Store.remote ? '' : ' · stored on this phone only'),
   ];
   return [topBar('Save'), content];
 }
 
-// Tap-to-paste. Also handles the system paste event as a fallback.
-async function pasteFromClipboard(status) {
+const isURL = t => /^https?:\/\/\S+$/i.test(t || '');
+
+// Tap-to-paste via the async clipboard API (iOS shows a "Paste" bubble).
+async function pasteFromClipboard() {
   if (!navigator.clipboard?.read) {
-    status.textContent = 'Long-press here and choose Paste.';
+    logPaste({ via: 'button', msg: 'clipboard.read not available' });
+    setStatus('This browser can’t read the clipboard from a button. Long-press the box below and tap Paste.');
     return;
   }
+  setStatus('Tap the Paste bubble…');
   let items;
   try { items = await navigator.clipboard.read(); }
-  catch { status.textContent = 'Paste was cancelled or blocked.'; return; }
-  const blobs = [];
-  let text = null;
-  for (const it of items) {
-    const t = it.types.find(t => t.startsWith('image/'));
-    if (t) blobs.push(await it.getType(t));
-    else if (it.types.includes('text/plain')) { try { text = (await (await it.getType('text/plain')).text()).trim(); } catch {} }
-  }
-  if (!blobs.length) {
-    status.textContent = text && /^https?:/.test(text) ? 'That’s a link, not an image. Use Copy Image instead.' : 'No image on the clipboard.';
+  catch (e) {
+    logPaste({ via: 'button', msg: `read failed: ${e.name} ${e.message || ''}`.trim() });
+    setStatus('Couldn’t read the clipboard. Long-press the box below and tap Paste instead.');
     return;
   }
-  await savePasted(blobs, text, status);
+  const blobs = [];
+  let text = '';
+  const types = [];
+  for (const it of items) {
+    types.push(...it.types);
+    const t = it.types.find(t => t.startsWith('image/'));
+    if (t) { try { blobs.push(await it.getType(t)); } catch (e) { logPaste({ via: 'button', msg: `getType(${t}) failed: ${e.name}` }); } }
+    for (const tt of ['text/uri-list', 'text/plain']) {
+      if (!text && it.types.includes(tt)) { try { text = (await (await it.getType(tt)).text()).trim().split(/\s+/)[0]; } catch {} }
+    }
+  }
+  logPaste({ via: 'button', msg: `types [${types.join(', ') || 'none'}]` });
+  await handleClip(blobs, text, types);
 }
 
-async function savePasted(blobs, text, status) {
-  status.textContent = 'Saving…';
-  const imageURL = text && /^https?:\/\//.test(text) ? text : null;
+// Paste events (the paste box, or a hardware keyboard).
+function onPasteEvent(e, via) {
+  const dt = e.clipboardData;
+  const blobs = [];
+  for (const f of dt?.files || []) if (f.type.startsWith('image/')) blobs.push(f);
+  if (!blobs.length) for (const it of dt?.items || []) {
+    if (it.kind === 'file' && it.type.startsWith('image/')) { const f = it.getAsFile(); if (f) blobs.push(f); }
+  }
+  const text = ((dt?.getData('text/uri-list') || dt?.getData('text/plain') || '').trim().split(/\s+/)[0]) || '';
+  const types = [...(dt?.types || [])];
+  logPaste({ via, msg: `types [${types.join(', ') || 'none'}], ${blobs.length} image file(s)` });
+  if (blobs.length || isURL(text)) {
+    e.preventDefault();
+    e.target.blur?.();
+    handleClip(blobs, text, types);
+  }
+  // Otherwise let the paste land in the box; rescueInsertedImages() checks it.
+}
+
+// Some iOS versions insert a pasted image as an <img> instead of exposing a file.
+async function rescueInsertedImages(zone) {
+  const imgs = [...zone.querySelectorAll('img')];
+  const text = zone.innerText.trim();
+  zone.replaceChildren();
+  zone.blur();
+  const blobs = [];
+  for (const img of imgs) {
+    try {
+      if (/^(blob|data):/.test(img.src)) blobs.push(await (await fetch(img.src)).blob());
+      else logPaste({ via: 'box', msg: `pasted image not readable (${img.src.slice(0, 30)}…)` });
+    } catch (e) { logPaste({ via: 'box', msg: `inserted image failed: ${e.name}` }); }
+  }
+  if (blobs.length || text) await handleClip(blobs, isURL(text) ? text : '', ['(inserted)']);
+}
+
+async function handleClip(blobs, text, types) {
+  if (blobs.length) return savePasted(blobs, isURL(text) ? text : null);
+  if (isURL(text)) return saveLink(text);
+  setStatus(types.length ? 'Nothing to save: the clipboard had no image or link.' : 'The clipboard looks empty.');
+}
+
+async function savePasted(blobs, imageURL) {
+  setStatus('Saving…');
   const res = await saveImages(blobs, { via: 'paste', source: 'web', sourceURL: ui.source || null, imageURL, gallery: ui.gallery || null });
-  reportSave(res, status);
+  logPaste({ via: 'save', msg: `saved ${res.saved}, dup ${res.dup}, failed ${res.failed}${res.errors[0] ? ' (' + res.errors[0] + ')' : ''}` });
+  reportSave(res);
+}
+
+// A link: try to download it as an image; otherwise keep it as a saved link.
+async function saveLink(url) {
+  setStatus('Saving link…');
+  const r = await saveLinkOrImage(url, { gallery: ui.gallery || null, sourceURL: ui.source || null });
+  logPaste({ via: 'link', msg: r.detail });
+  if (r.res) return reportSave(r.res);
+  setStatus(r.message);
+  toast(r.message, { kind: r.dup ? '' : 'ok', ms: 3200 });
+  renderMain({ keepScroll: true });
 }
 
 document.addEventListener('paste', e => {
   if (!S.archive || ui.tab !== 'capture') return;
-  if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-  const files = [...(e.clipboardData?.files || [])].filter(f => f.type.startsWith('image/'));
-  if (!files.length) return;
-  e.preventDefault();
-  savePasted(files, e.clipboardData.getData('text/plain'), $('.cap-status') || h('div'));
+  if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target.closest?.('.paste-zone')) return;
+  onPasteEvent(e, 'keyboard');
 });
 
-function reportSave(res, status, fromPhotos = false) {
+function reportSave(res, fromPhotos = false) {
   ui.recent.unshift(...res.ids);
   const gname = ui.gallery ? S.archive.galleries.get(ui.gallery)?.name : 'Unsorted';
   const parts = [];
   if (res.saved) parts.push(`Saved ${res.saved > 1 ? res.saved + ' images ' : ''}to ${gname}`);
   if (res.dup) parts.push(`${res.dup} already saved${ui.gallery ? ' (added to ' + gname + ')' : ''}`);
   if (res.full) parts.push(`Archive full: ${res.full} not saved`);
-  if (res.failed) parts.push(`${res.failed} couldn’t be read`);
-  const msg = parts.join(' · ') || 'Nothing saved';
+  if (res.failed) parts.push(`${res.failed} couldn\u2019t be read`);
+  const msg = parts.join(' \u00b7 ') || 'Nothing saved';
   toast(msg, { kind: res.full || res.failed ? 'err' : 'ok', ms: res.full ? 5000 : 2200 });
+  ui.capStatus = fromPhotos && res.saved ? msg + '. Delete them from Photos yourself if you like; a web app can\u2019t.' : msg;
   renderMain({ keepScroll: true });
-  const st = $('.cap-status');
-  if (st) st.textContent = fromPhotos && res.saved ? msg + '. You can now delete them from Photos yourself; a web app can’t.' : msg;
   if (navigator.vibrate) navigator.vibrate(15);
 }
 

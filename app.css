@@ -207,3 +207,24 @@ select.field { appearance: none; -webkit-appearance: none; }
   background: linear-gradient(transparent, rgba(0,0,0,.6)); font-size: 13px; color: #ccc; transition: opacity .2s;
 }
 .viewer.bare .v-top, .viewer.bare .v-caption { opacity: 0; pointer-events: none; }
+
+/* ---- v0.1.1: paste box, paste log, links ---- */
+.paste-zone {
+  min-height: 64px; margin: 8px 0 4px; padding: 14px; border-radius: 16px;
+  border: 1.5px dashed #3a4a80; background: rgba(43,60,117,.12); color: var(--muted);
+  font-size: 15px; outline: none; overflow: hidden; max-height: 120px;
+  -webkit-user-select: text; user-select: text; -webkit-touch-callout: default;
+}
+.paste-zone:empty::before { content: "Or long-press here and tap Paste"; color: #8d97c4; pointer-events: none; }
+.paste-zone:focus { border-color: var(--accent); }
+.paste-zone img { max-height: 60px; }
+details.more { margin: 10px 0; background: var(--bg2); border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px; }
+details.more summary { color: var(--muted); font-size: 14px; cursor: pointer; }
+.paste-log { font: 12px/1.5 ui-monospace, "SF Mono", Menlo, monospace; color: var(--muted); margin-top: 8px; overflow-wrap: anywhere; -webkit-user-select: text; user-select: text; }
+.log-row { padding: 3px 0; border-bottom: 1px solid var(--line); }
+.list-row { display: flex; align-items: center; gap: 10px; width: 100%; padding: 14px; background: var(--bg2); border: 1px solid var(--line); border-radius: 14px; margin-bottom: 18px; text-align: left; }
+.list-row > .ic:last-child { transform: rotate(180deg); color: var(--muted); }
+.link-item { display: flex; align-items: center; gap: 4px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.link-main { flex: 1; min-width: 0; color: var(--text); text-decoration: none; }
+.link-host { font-weight: 600; font-size: 15px; }
+.link-path { color: var(--accent); font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

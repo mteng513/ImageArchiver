@@ -253,6 +253,11 @@ export class Archive {
     }
   }
 
+  links() {
+    return [...this.posts.values()].filter(p => !p.deleted && p.via === 'link' && !p.media.length)
+      .sort((a, b) => b.savedAt - a.savedAt);
+  }
+
   galleryList() {
     return [...this.galleries.values()].filter(g => !g.deleted).sort((a, b) => a.order - b.order);
   }

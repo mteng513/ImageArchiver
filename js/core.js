@@ -169,6 +169,69 @@ export async function saveImages(blobs, meta, onProgress) {
   return res;
 }
 
+export function detectSource(url) {
+  let host = '';
+  try { host = new URL(url).hostname.replace(/^www\.|^m\.|^mobile\./, ''); } catch {}
+  if (/(^|\.)(x|twitter)\.com$|(^|\.)twimg\.com$/.test(host)) return 'x';
+  if (/(^|\.)instagram\.com$|(^|\.)cdninstagram\.com$/.test(host)) return 'instagram';
+  if (/(^|\.)reddit\.com$|(^|\.)redd\.it$/.test(host)) return 'reddit';
+  return 'web';
+}
+
+const IMG_EXT = /\.(jpe?g|png|webp|gif|heic|avif)(\?|#|$)/i;
+const IMG_HOSTS = /^(pbs\.twimg\.com|i\.redd\.it|preview\.redd\.it|i\.imgur\.com)$/i;
+
+// Try to download a link as an image (works only when the host allows it);
+// otherwise keep it as a saved link, waiting for a later step to fetch its images.
+export async function saveLinkOrImage(url, { gallery = null, sourceURL = null } = {}) {
+  const A = S.archive;
+  let host = '';
+  try { host = new URL(url).hostname; } catch {}
+  const looksImage = IMG_EXT.test(url) || IMG_HOSTS.test(host);
+  let why = '';
+  if (looksImage) {
+    try {
+      const r = await fetch(url, { mode: 'cors', credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store' });
+      const type = r.headers.get('content-type') || '';
+      if (r.ok && type.startsWith('image/')) {
+        const blob = await r.blob();
+        const res = await saveImages([blob], { via: 'link', source: detectSource(url), sourceURL, imageURL: url, gallery });
+        return { res, detail: `downloaded image (${type}, ${blob.size} B)` };
+      }
+      why = `HTTP ${r.status} ${type}`;
+    } catch (e) {
+      why = `blocked by the site (${e.name})`;
+    }
+  }
+  for (const p of A.posts.values()) {
+    if (!p.deleted && p.via === 'link' && p.status === 'pending' && p.sourceURL === url) {
+      return { dup: true, message: 'That link is already saved.', detail: 'duplicate link' };
+    }
+  }
+  await A.commit([{
+    op: 'post.add', id: A.newId(), source: detectSource(url), via: 'link',
+    sourceURL: url, imageURL: null, pageTitle: null, author: null, caption: null, postedAt: null,
+    savedAt: Date.now(), status: 'pending', reason: looksImage ? 'The site doesn’t let apps download this image directly.' : null,
+    gallery, media: [],
+  }]);
+  return {
+    message: looksImage ? 'Saved as a link: the site doesn’t allow direct downloads. Copy Image works instead.' : 'Link saved. Its images get fetched in a later step; for now, Copy Image saves the picture itself.',
+    detail: looksImage ? `image download failed: ${why}; saved as link` : 'saved as link',
+  };
+}
+
+export async function deletePosts(pids) {
+  const A = S.archive;
+  await A.commit(pids.map(id => ({ op: 'post.delete', id })));
+  for (const pid of pids) {
+    for (const mid of A.posts.get(pid)?.media || []) {
+      const m = A.media.get(mid);
+      for (const k of [m?.orig, m?.thumb]) if (k && k.startsWith('p/')) await Store.del(k);
+      urls.drop(mid);
+    }
+  }
+}
+
 export async function deleteMedia(mids) {
   const A = S.archive;
   const postIds = new Set(mids.map(id => A.media.get(id)?.postId).filter(Boolean));
