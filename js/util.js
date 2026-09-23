@@ -133,6 +133,8 @@ const P = {
   edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/>',
   shuffle: '<path d="M4 7h3l10 10h3M4 17h3l3-3M14 10l3-3h3M18 4l3 3-3 3M18 14l3 3-3 3"/>',
   sync: '<path d="M4 12a8 8 0 0114-5.3L20 9M20 4v5h-5M20 12a8 8 0 01-14 5.3L4 15M4 20v-5h5"/>',
+  sortDown: '<path d="M8 4v16M4.5 16.5L8 20l3.5-3.5M13 6h7M13 11h5M13 16h3"/>',
+  sortUp: '<path d="M8 20V4M4.5 7.5L8 4l3.5 3.5M13 6h3M13 11h5M13 16h7"/>',
   video: '<rect x="3" y="6" width="13" height="12" rx="2"/><path d="M16 10l5-3v10l-5-3"/>',
 };
 export function icon(name, size = 22) {

@@ -2,10 +2,11 @@ import { h, $, icon, idb, fmtBytes, fmtDate } from './util.js';
 import { S, isSetUp, hasPasscode, createArchive, unlock, lock, parseCode, backupCode, pairingCode,
   saveImages, deleteMedia, deletePosts, saveLinkOrImage, urls, saveB2, testB2, changePasscode, eraseDevice, LIMIT } from './core.js';
 import { Store, onStoreEvent, monthDownloads, cachePolicy } from './store.js';
-import { toast, sheet, askText, confirmBox, pickGallery, createGallery, progressBar } from './ui.js';
+import { toast, sheet, askText, confirmBox, pickGallery, createGallery, progressBar, tagSheet, editTags } from './ui.js';
+import { tagKey, cleanTag } from './log.js';
 import { openViewer, labelFor } from './viewer.js';
 
-const VERSION = '0.1.1';
+const VERSION = '0.2.0';
 const app = $('#app');
 const ui = {
   tab: 'capture',
@@ -15,6 +16,8 @@ const ui = {
   gallery: '',           // current capture gallery ('' = Unsorted)
   source: '',            // sticky source link for capture
   recent: [],            // media ids saved this session
+  capTags: [],           // tags applied to the next saves
+  sort: 'new',           // grid order: 'new' | 'old'
   lastSync: null,
   syncing: false,
 };
@@ -33,6 +36,8 @@ async function enterApp() {
   const g = S.archive.galleries.get(ui.gallery);
   if (!g || g.deleted) ui.gallery = '';
   ui.source = (await idb.get('kv', 'lastSource')) || '';
+  ui.capTags = (await idb.get('kv', 'capTags')) || [];
+  ui.sort = (await idb.get('kv', 'sort')) || 'new';
   S.archive.onChange(() => scheduleRender());
   renderMain();
   syncNow();
@@ -290,6 +295,8 @@ function libraryHome() {
     .map(([f, t, k]) => [f, t, k, A.list(f)]).filter(x => x[3].length);
 
   const links = A.links();
+  const tags = A.tagList();
+  const untagged = tags.length ? A.list({ type: 'untagged' }).length : 0;
   const content = [
     !all.length ? h('div', { class: 'empty-state' }, icon('photos', 40), h('p', null, 'Nothing saved yet.'),
       h('button', { class: 'btn primary', onclick: () => { ui.tab = 'capture'; renderMain(); } }, 'Save your first image')) : null,
@@ -304,6 +311,13 @@ function libraryHome() {
       } }, 'New'),
       galleries.length ? h('button', { class: 'link-btn', onclick: () => { ui.editing = !ui.editing; renderMain(); } }, ui.editing ? 'Done' : 'Edit') : null),
     galleriesEl,
+    h('div', { class: 'section-head' }, h('h3', null, 'Tags'), h('span', { class: 'grow' }),
+      tags.length ? h('button', { class: 'link-btn', onclick: async () => { await manageTags(); renderMain(); } }, 'Edit') : null),
+    tags.length ? h('div', { class: 'chips wrap tag-cloud' },
+      ...tags.map(t => h('button', { class: 'chip tag', onclick: () => open({ type: 'tags', tags: [t.key] }, '#' + t.name, 'tags:' + t.key) },
+        '#' + t.name, h('span', { class: 'n' }, t.count))),
+      untagged ? h('button', { class: 'chip ghost tag', onclick: () => open({ type: 'untagged' }, 'Untagged', 'untagged') }, 'Untagged', h('span', { class: 'n' }, untagged)) : null)
+      : h('p', { class: 'muted small' }, all.length ? 'No tags yet. Tag images from the viewer’s ⓘ button, or tap Select in any gallery and use Tags.' : 'Tags you add show up here.'),
     links.length ? h('div', { class: 'section-head' }, h('h3', null, 'Links')) : null,
     links.length ? h('button', { class: 'list-row', onclick: () => open({ type: 'links' }, 'Saved links', 'links') },
       icon('link', 20), h('span', { class: 'grow' }, 'Saved links'), h('span', { class: 'muted' }, links.length), icon('back', 16)) : null,
@@ -345,14 +359,27 @@ function linksView() {
 }
 
 const PAGE = 180;
+function filterTitle(top) {
+  const A = S.archive;
+  if (top.filter.type === 'gallery') return A.galleries.get(top.filter.id).name;
+  if (top.filter.type === 'tags') return top.filter.tags.map(k => '#' + (A.tagNames.get(k) || k)).join(' + ');
+  return top.title;
+}
+
 function gridView() {
   const A = S.archive;
   const top = ui.libStack[ui.libStack.length - 1];
   if (top.filter.type === 'gallery' && (!A.galleries.get(top.filter.id) || A.galleries.get(top.filter.id).deleted)) {
     ui.libStack = []; return libraryHome();
   }
-  const title = top.filter.type === 'gallery' ? A.galleries.get(top.filter.id).name : top.title;
-  const list = A.list(top.filter);
+  if (top.filter.type === 'tags') {
+    top.filter.tags = top.filter.tags.filter(k => A.tagNames.has(k));
+    if (!top.filter.tags.length) { ui.libStack.pop(); return ui.libStack.length ? gridView() : libraryHome(); }
+    top.key = 'tags:' + top.filter.tags.join(',');
+  }
+  const title = filterTitle(top);
+  let list = A.list(top.filter);
+  if (ui.sort === 'old') list = list.slice().reverse();
   const sel = ui.selecting;
   const back = () => { ui.libStack.pop(); ui.selecting = null; renderMain(); };
 
@@ -384,15 +411,49 @@ function gridView() {
   };
   more();
 
-  const actions = sel ? [h('button', { class: 'link-btn', onclick: () => { ui.selecting = null; renderMain({ keepScroll: true }); } }, 'Cancel')]
-    : [list.length ? h('button', { class: 'icon-btn', 'aria-label': 'Play slideshow', onclick: () => openViewer(list, 0, { viewKey: top.key, autoplay: true }) }, icon('play')) : null,
+  const actions = sel
+    ? [h('button', { class: 'link-btn', onclick: () => {
+        const allOn = list.every(m => sel.has(m.id));
+        ui.selecting = allOn ? new Set() : new Set(list.map(m => m.id));
+        renderMain({ keepScroll: true });
+      } }, list.every(m => sel.has(m.id)) ? 'Deselect all' : 'Select all'),
+      h('button', { class: 'link-btn', onclick: () => { ui.selecting = null; renderMain({ keepScroll: true }); } }, 'Cancel')]
+    : [list.length > 1 ? h('button', { class: 'icon-btn', 'aria-label': ui.sort === 'old' ? 'Showing oldest first' : 'Showing newest first', onclick: async () => {
+        ui.sort = ui.sort === 'old' ? 'new' : 'old';
+        await idb.put('kv', 'sort', ui.sort);
+        toast(ui.sort === 'old' ? 'Oldest first' : 'Newest first', { ms: 1200 });
+        renderMain();
+      } }, icon(ui.sort === 'old' ? 'sortUp' : 'sortDown')) : null,
+      list.length ? h('button', { class: 'icon-btn', 'aria-label': 'Play slideshow', onclick: () => openViewer(list, 0, { viewKey: top.key, autoplay: true }) }, icon('play')) : null,
       list.length ? h('button', { class: 'link-btn', onclick: () => { ui.selecting = new Set(); renderMain({ keepScroll: true }); } }, 'Select') : null];
 
+  // Tag views: the active tags, tap to drop one, "+ Tag" to narrow further (images must have all of them).
+  const tagBar = top.filter.type === 'tags' ? h('div', { class: 'chips' },
+    ...top.filter.tags.map(k => h('button', { class: 'chip tag on', onclick: () => {
+      top.filter.tags = top.filter.tags.filter(x => x !== k);
+      if (!top.filter.tags.length) ui.libStack.pop();
+      renderMain();
+    } }, '#' + (A.tagNames.get(k) || k), h('span', { class: 'x' }, '×'))),
+    h('button', { class: 'chip ghost', onclick: async () => {
+      await tagSheet({
+        title: 'Show images tagged',
+        hint: 'Images must have every highlighted tag.',
+        state: key => top.filter.tags.includes(key) ? 'on' : 'off',
+        toggle: (name, st) => {
+          const key = tagKey(name);
+          top.filter.tags = st === 'on' ? top.filter.tags.filter(x => x !== key) : [...top.filter.tags, key];
+        },
+      });
+      if (!top.filter.tags.length) ui.libStack.pop();
+      renderMain();
+    } }, '+ Tag')) : null;
+
   const content = [
-    h('div', { class: 'grid-meta muted' }, `${list.length} image${list.length === 1 ? '' : 's'}`),
+    tagBar,
+    h('div', { class: 'grid-meta muted' }, `${list.length} image${list.length === 1 ? '' : 's'}${list.length > 1 ? ' · ' + (ui.sort === 'old' ? 'oldest first' : 'newest first') : ''}`),
     list.length ? grid : h('div', { class: 'empty-state' }, h('p', null, 'Nothing here yet.')),
   ];
-  const footer = sel ? selectionBar(top, list) : null;
+  const footer = sel ? selectionBar(top) : null;
   return [topBar(title, { back, actions }), content, footer];
 }
 
@@ -401,24 +462,29 @@ function selectionBar(top) {
   const need = fn => async () => { if (!ui.selecting.size) return toast('Select some images first'); await fn(); };
   const done = () => { ui.selecting = null; renderMain({ keepScroll: true }); };
   const inGallery = top.filter.type === 'gallery';
+  const galleryActions = async () => {
+    const choice = await sheet(close => [
+      h('div', { class: 'pick-list' },
+        h('button', { class: 'row', onclick: () => close('add') }, 'Add to a gallery…'),
+        inGallery ? h('button', { class: 'row', onclick: () => close('move') }, 'Move to another gallery…') : null,
+        inGallery ? h('button', { class: 'row', onclick: () => close('remove') }, `Remove from “${S.archive.galleries.get(top.filter.id).name}”`) : null),
+    ], { title: `${ui.selecting.size} selected` });
+    if (!choice) return;
+    if (choice === 'remove') {
+      await S.archive.commit([{ op: 'membership.remove', gallery: top.filter.id, media: ids() }]);
+      toast('Removed from gallery'); return done();
+    }
+    const gid = await pickGallery({ title: choice === 'move' ? 'Move to gallery' : 'Add to gallery', exclude: inGallery ? top.filter.id : null });
+    if (!gid) return;
+    const ops = [{ op: 'membership.add', gallery: gid, media: ids() }];
+    if (choice === 'move') ops.push({ op: 'membership.remove', gallery: top.filter.id, media: ids() });
+    await S.archive.commit(ops);
+    toast(choice === 'move' ? 'Moved' : 'Added'); done();
+  };
   return h('nav', { class: 'selbar' },
     h('span', { class: 'sel-count' }, `${ui.selecting.size} selected`),
-    h('button', { class: 'link-btn', onclick: need(async () => {
-      const gid = await pickGallery({ title: 'Add to gallery', exclude: inGallery ? top.filter.id : null });
-      if (!gid) return;
-      await S.archive.commit([{ op: 'membership.add', gallery: gid, media: ids() }]);
-      toast('Added'); done();
-    }) }, 'Add to'),
-    inGallery ? h('button', { class: 'link-btn', onclick: need(async () => {
-      const gid = await pickGallery({ title: 'Move to gallery', exclude: top.filter.id });
-      if (!gid) return;
-      await S.archive.commit([{ op: 'membership.add', gallery: gid, media: ids() }, { op: 'membership.remove', gallery: top.filter.id, media: ids() }]);
-      toast('Moved'); done();
-    }) }, 'Move') : null,
-    inGallery ? h('button', { class: 'link-btn', onclick: need(async () => {
-      await S.archive.commit([{ op: 'membership.remove', gallery: top.filter.id, media: ids() }]);
-      toast('Removed from gallery'); done();
-    }) }, 'Remove') : null,
+    h('button', { class: 'link-btn', onclick: need(galleryActions) }, 'Gallery'),
+    h('button', { class: 'link-btn', onclick: need(async () => { await editTags(ids()); done(); }) }, 'Tags'),
     h('button', { class: 'icon-btn', 'aria-label': 'Favorite', onclick: need(async () => {
       const all = ids().every(id => S.archive.favorites.has(id));
       await S.archive.commit([{ op: 'favorite.set', media: ids(), value: !all }]);
@@ -430,6 +496,27 @@ function selectionBar(top) {
       await deleteMedia(ids());
       toast('Deleted'); done();
     }) }, icon('trash')));
+}
+
+// Rename or delete tags everywhere.
+function manageTags() {
+  const A = S.archive;
+  return sheet(() => {
+    const box = h('div');
+    const draw = () => box.replaceChildren(...A.tagList().map(t => h('div', { class: 'edit-row' },
+      h('span', { class: 'name' }, '#' + t.name, h('span', { class: 'muted small' }, ' · ' + t.count)),
+      h('button', { class: 'icon-btn', 'aria-label': 'Rename tag', onclick: async () => {
+        const name = await askText({ title: 'Rename tag', value: t.name });
+        if (name && cleanTag(name) && cleanTag(name) !== t.name) { await A.commit([{ op: 'tag.rename', from: t.name, to: name }]); draw(); }
+      } }, icon('edit', 20)),
+      h('button', { class: 'icon-btn danger', 'aria-label': 'Delete tag', onclick: async () => {
+        if (await confirmBox({ title: `Delete #${t.name}?`, body: `Removes the tag from ${t.count} image${t.count === 1 ? '' : 's'}. The images stay.`, ok: 'Delete tag', danger: true })) {
+          await A.commit([{ op: 'tag.delete', tag: t.name }]); draw();
+        }
+      } }, icon('trash', 20)))));
+    draw();
+    return [h('p', { class: 'muted small' }, 'Renaming to an existing tag merges the two.'), box];
+  }, { title: 'Manage tags', tall: true });
 }
 
 // ---------------------------------------------------------------- capture
@@ -460,6 +547,22 @@ function captureView() {
       if (name) setGallery(await createGallery(name));
     } }, '+ New'));
 
+  const setCapTags = async (tags) => { ui.capTags = tags; await idb.put('kv', 'capTags', tags); };
+  const capTagRow = h('div', { class: 'chips' },
+    h('span', { class: 'chip-label' }, 'Tags'),
+    ...ui.capTags.map(t => h('button', { class: 'chip tag on', 'aria-label': `Remove tag ${t}`, onclick: async () => {
+      await setCapTags(ui.capTags.filter(x => x !== t)); renderMain({ keepScroll: true });
+    } }, '#' + t, h('span', { class: 'x' }, '×'))),
+    h('button', { class: 'chip ghost', onclick: async () => {
+      await tagSheet({
+        title: 'Tags for the next saves',
+        hint: 'Every image you save gets these tags until you remove them.',
+        state: key => ui.capTags.some(t => tagKey(t) === key) ? 'on' : 'off',
+        toggle: (name, st) => setCapTags(st === 'on' ? ui.capTags.filter(t => tagKey(t) !== tagKey(name)) : [...ui.capTags, cleanTag(name)]),
+        extra: () => ui.capTags,
+      });
+      renderMain({ keepScroll: true });
+    } }, ui.capTags.length ? '+' : '+ Tag'));
   const status = h('div', { class: 'cap-status', 'aria-live': 'polite' }, ui.capStatus || '');
   const bar = progressBar();
   bar.el.hidden = true;
@@ -479,7 +582,7 @@ function captureView() {
     e.target.value = '';
     if (!files.length) return;
     bar.el.hidden = false;
-    const res = await saveImages(files, { via: 'photos', source: 'import', gallery: ui.gallery || null },
+    const res = await saveImages(files, { via: 'photos', source: 'import', gallery: ui.gallery || null, tags: ui.capTags },
       (d, t) => bar.set(d, t, `Saving ${Math.min(d + 1, t)} of ${t}…`));
     bar.el.hidden = true;
     reportSave(res, true);
@@ -494,6 +597,7 @@ function captureView() {
   const recent = ui.recent.map(id => A.media.get(id)).filter(m => m && !m.deleted);
   const content = [
     h('div', { class: 'label' }, 'Save to'), chips,
+    capTagRow,
     pasteBtn,
     zone,
     status,
@@ -589,7 +693,7 @@ async function handleClip(blobs, text, types) {
 
 async function savePasted(blobs, imageURL) {
   setStatus('Saving…');
-  const res = await saveImages(blobs, { via: 'paste', source: 'web', sourceURL: ui.source || null, imageURL, gallery: ui.gallery || null });
+  const res = await saveImages(blobs, { via: 'paste', source: 'web', sourceURL: ui.source || null, imageURL, gallery: ui.gallery || null, tags: ui.capTags });
   logPaste({ via: 'save', msg: `saved ${res.saved}, dup ${res.dup}, failed ${res.failed}${res.errors[0] ? ' (' + res.errors[0] + ')' : ''}` });
   reportSave(res);
 }
@@ -597,7 +701,7 @@ async function savePasted(blobs, imageURL) {
 // A link: try to download it as an image; otherwise keep it as a saved link.
 async function saveLink(url) {
   setStatus('Saving link…');
-  const r = await saveLinkOrImage(url, { gallery: ui.gallery || null, sourceURL: ui.source || null });
+  const r = await saveLinkOrImage(url, { gallery: ui.gallery || null, sourceURL: ui.source || null, tags: ui.capTags });
   logPaste({ via: 'link', msg: r.detail });
   if (r.res) return reportSave(r.res);
   setStatus(r.message);

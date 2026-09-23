@@ -1,7 +1,7 @@
 // Full-screen viewer: swipe, pinch-zoom, double-tap fit/fill, slideshow.
 import { h, icon, idb, fmtDate, fmtBytes } from './util.js';
 import { S, urls, deleteMedia } from './core.js';
-import { sheet, toast, confirmBox, pickGallery } from './ui.js';
+import { sheet, toast, confirmBox, pickGallery, editTags } from './ui.js';
 
 const DEFAULTS = { interval: 5, loop: true, shuffle: false, transition: 'fade' };
 
@@ -75,7 +75,8 @@ export async function openViewer(list, start = 0, { viewKey = 'all', autoplay = 
     const p = S.archive.posts.get(m.postId);
     let host = '';
     try { host = p.sourceURL ? new URL(p.sourceURL).hostname.replace(/^www\./, '') : ''; } catch {}
-    caption.textContent = [host || labelFor(p), fmtDate(p.savedAt)].filter(Boolean).join(' · ');
+    const tags = S.archive.mediaTags(m.id).map(t => '#' + t).join(' ');
+    caption.textContent = [host || labelFor(p), fmtDate(p.savedAt), tags].filter(Boolean).join(' · ');
     // Preload the next two full images.
     for (const o of [1, 2]) { const n = at(pos + o); if (n) urls.orig(n).catch(() => {}); }
   }
@@ -265,6 +266,11 @@ export async function openViewer(list, start = 0, { viewKey = 'all', autoplay = 
         } }, '+ Gallery'));
       };
       drawChips();
+      const tagChips = h('div', { class: 'chips wrap' });
+      const drawTags = () => tagChips.replaceChildren(
+        ...S.archive.mediaTags(m.id).map(t => h('span', { class: 'chip tag on' }, '#' + t)),
+        h('button', { class: 'chip ghost', onclick: async () => { await editTags([m.id]); drawTags(); render(); } }, 'Edit tags'));
+      drawTags();
       return [
         row('Saved', fmtDate(p.savedAt)),
         row('From', labelFor(p)),
@@ -273,6 +279,7 @@ export async function openViewer(list, start = 0, { viewKey = 'all', autoplay = 
         p.sourceURL ? h('div', { class: 'kv' }, h('span', { class: 'k' }, 'Source'), link(p.sourceURL, 'Open original')) : null,
         p.imageURL ? h('div', { class: 'kv' }, h('span', { class: 'k' }, 'Image'), link(p.imageURL, 'Open image link')) : null,
         row('Size', `${m.w} × ${m.h} · ${fmtBytes(m.size)}`),
+        h('div', { class: 'label' }, 'Tags'), tagChips,
         h('div', { class: 'label' }, 'Galleries'), chips,
         h('button', { class: 'btn block danger', onclick: async () => {
           if (!(await confirmBox({ title: 'Delete this image?', body: 'It’s removed from every gallery and from storage.', ok: 'Delete', danger: true }))) return;

@@ -1,6 +1,7 @@
 // Shared UI pieces: sheets, dialogs, toasts, gallery picker.
 import { h, icon } from './util.js';
 import { S } from './core.js';
+import { cleanTag, tagKey } from './log.js';
 
 export function toast(msg, { ms = 2200, kind = '' } = {}) {
   let wrap = document.getElementById('toasts');
@@ -90,4 +91,58 @@ export function progressBar() {
       label.textContent = text || `${done} / ${total}`;
     },
   };
+}
+
+// Tag chooser. state(key) -> 'on' | 'some' | 'off'; toggle(name, state) applies a tap.
+// extra() lists tag names to show even if no image has them yet.
+export function tagSheet({ title = 'Tags', state, toggle, extra = () => [], hint }) {
+  return sheet(close => {
+    const input = h('input', { class: 'field', placeholder: 'Find or create a tag', autocapitalize: 'off', autocomplete: 'off', enterkeyhint: 'done' });
+    const list = h('div', { class: 'chips wrap tag-chips' });
+    const all = () => {
+      const out = S.archive.tagList();
+      for (const name of extra()) if (!out.some(t => t.key === tagKey(name))) out.push({ key: tagKey(name), name, count: 0 });
+      return out;
+    };
+    const draw = () => {
+      const q = tagKey(input.value);
+      const tags = all();
+      const shown = q ? tags.filter(t => t.key.includes(q)) : tags;
+      const nodes = shown.map(t => {
+        const st = state(t.key);
+        return h('button', { class: 'chip tag' + (st === 'on' ? ' on' : st === 'some' ? ' some' : ''), onclick: async () => { await toggle(t.name, st); draw(); } },
+          '#' + t.name, t.count ? h('span', { class: 'n' }, t.count) : null);
+      });
+      if (q && !tags.some(t => t.key === q)) nodes.unshift(h('button', { class: 'chip ghost', onclick: create }, `+ Create \u201c${cleanTag(input.value)}\u201d`));
+      if (!nodes.length) nodes.push(h('p', { class: 'muted small' }, 'No tags yet. Type one above.'));
+      list.replaceChildren(...nodes);
+    };
+    const create = async () => {
+      const name = cleanTag(input.value);
+      if (!name) return;
+      if (state(tagKey(name)) !== 'on') await toggle(name, 'off');
+      input.value = '';
+      draw();
+    };
+    input.addEventListener('input', draw);
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); create(); } });
+    draw();
+    return [hint ? h('p', { class: 'muted small' }, hint) : null, input, list,
+      h('button', { class: 'btn primary block', onclick: () => close(true) }, 'Done')];
+  }, { title, tall: true });
+}
+
+// Add/remove tags on a set of images. Tapping a tag some of them have adds it to all.
+export function editTags(mids, title) {
+  const A = S.archive;
+  return tagSheet({
+    title: title || (mids.length === 1 ? 'Tags' : `Tags for ${mids.length} images`),
+    hint: mids.length > 1 ? 'Highlighted = on all selected images; outlined = on some. Tap to add to all, tap again to remove from all.' : null,
+    state: key => {
+      let n = 0;
+      for (const id of mids) if (A.tags.get(id)?.has(key)) n++;
+      return n === 0 ? 'off' : n === mids.length ? 'on' : 'some';
+    },
+    toggle: (name, st) => A.commit([{ op: st === 'on' ? 'tag.remove' : 'tag.add', tag: name, media: mids }]),
+  });
 }

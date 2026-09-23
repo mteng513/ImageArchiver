@@ -135,6 +135,7 @@ export async function saveImages(blobs, meta, onProgress) {
         if (meta.gallery && !A.members.get(meta.gallery)?.has(existing)) {
           ops.push({ op: 'membership.add', gallery: meta.gallery, media: [existing] });
         }
+        for (const tag of meta.tags || []) ops.push({ op: 'tag.add', tag, media: [existing] });
         continue;
       }
       const encOrig = await encrypt(S.key, img.bytes);
@@ -154,6 +155,7 @@ export async function saveImages(blobs, meta, onProgress) {
           size: img.bytes.length, osize: encOrig.length, tsize: encThumb.length, type: img.type }],
       });
       if (meta.gallery) ops.push({ op: 'membership.add', gallery: meta.gallery, media: [mid] });
+      for (const tag of meta.tags || []) ops.push({ op: 'tag.add', tag, media: [mid] });
       res.saved++;
       res.ids.push(mid);
       // Keep segments reasonably sized during bulk imports.
@@ -183,7 +185,7 @@ const IMG_HOSTS = /^(pbs\.twimg\.com|i\.redd\.it|preview\.redd\.it|i\.imgur\.com
 
 // Try to download a link as an image (works only when the host allows it);
 // otherwise keep it as a saved link, waiting for a later step to fetch its images.
-export async function saveLinkOrImage(url, { gallery = null, sourceURL = null } = {}) {
+export async function saveLinkOrImage(url, { gallery = null, sourceURL = null, tags = [] } = {}) {
   const A = S.archive;
   let host = '';
   try { host = new URL(url).hostname; } catch {}
@@ -195,7 +197,7 @@ export async function saveLinkOrImage(url, { gallery = null, sourceURL = null } 
       const type = r.headers.get('content-type') || '';
       if (r.ok && type.startsWith('image/')) {
         const blob = await r.blob();
-        const res = await saveImages([blob], { via: 'link', source: detectSource(url), sourceURL, imageURL: url, gallery });
+        const res = await saveImages([blob], { via: 'link', source: detectSource(url), sourceURL, imageURL: url, gallery, tags });
         return { res, detail: `downloaded image (${type}, ${blob.size} B)` };
       }
       why = `HTTP ${r.status} ${type}`;
@@ -212,7 +214,7 @@ export async function saveLinkOrImage(url, { gallery = null, sourceURL = null } 
     op: 'post.add', id: A.newId(), source: detectSource(url), via: 'link',
     sourceURL: url, imageURL: null, pageTitle: null, author: null, caption: null, postedAt: null,
     savedAt: Date.now(), status: 'pending', reason: looksImage ? 'The site doesn’t let apps download this image directly.' : null,
-    gallery, media: [],
+    gallery, tags, media: [],
   }]);
   return {
     message: looksImage ? 'Saved as a link: the site doesn’t allow direct downloads. Copy Image works instead.' : 'Link saved. Its images get fetched in a later step; for now, Copy Image saves the picture itself.',

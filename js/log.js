@@ -25,6 +25,8 @@ export class Archive {
     this.galleries = new Map();
     this.members = new Map();
     this.favorites = new Set();
+    this.tags = new Map();      // mediaId -> Set(tag key)
+    this.tagNames = new Map();  // tag key -> display name
     this.segBytes = 0;
     this.lastTs = 0;
     this._sorted = null;
@@ -81,6 +83,7 @@ export class Archive {
           m.deleted = true;
           if (this.byHash.get(m.hash) === mid) this.byHash.delete(m.hash);
           this.favorites.delete(mid);
+          this.tags.delete(mid);
           for (const set of this.members.values()) set.delete(mid);
         }
         break;
@@ -119,6 +122,36 @@ export class Archive {
           if (op.value && m && !m.deleted) this.favorites.add(mid); else this.favorites.delete(mid);
         }
         break;
+      case 'tag.add':
+      case 'tag.remove': {
+        const key = tagKey(op.tag);
+        if (!key) break;
+        if (op.op === 'tag.add' && !this.tagNames.has(key)) this.tagNames.set(key, cleanTag(op.tag));
+        for (const mid of [].concat(op.media)) {
+          const m = this.media.get(mid);
+          if (op.op === 'tag.add') {
+            if (!m || m.deleted) continue;
+            let set = this.tags.get(mid);
+            if (!set) this.tags.set(mid, set = new Set());
+            set.add(key);
+          } else this.tags.get(mid)?.delete(key);
+        }
+        break;
+      }
+      case 'tag.rename': {
+        const from = tagKey(op.from), to = tagKey(op.to);
+        if (!from || !to) break;
+        for (const set of this.tags.values()) if (set.delete(from)) set.add(to);
+        this.tagNames.delete(from);
+        this.tagNames.set(to, cleanTag(op.to));
+        break;
+      }
+      case 'tag.delete': {
+        const key = tagKey(op.tag);
+        for (const set of this.tags.values()) set.delete(key);
+        this.tagNames.delete(key);
+        break;
+      }
       default:
         // queue.done, review.* etc. belong to later phases; ignored here.
         break;
@@ -247,10 +280,31 @@ export class Archive {
       case 'unsorted': return all.filter(m => !this.inAnyGallery(m.id));
       case 'fav': return all.filter(m => this.favorites.has(m.id));
       case 'gallery': { const s = this.members.get(filter.id) || new Set(); return all.filter(m => s.has(m.id)); }
+      case 'tags': return all.filter(m => { const t = this.tags.get(m.id); return !!t && filter.tags.every(k => t.has(k)); });
+      case 'untagged': return all.filter(m => !this.tags.get(m.id)?.size);
       case 'via': return all.filter(m => this.posts.get(m.postId).via === filter.via);
       case 'source': return all.filter(m => this.posts.get(m.postId).source === filter.source);
       default: return all;
     }
+  }
+
+  // [{key, name, count}] for tags on live images, most used first.
+  tagList(within = null) {
+    const counts = new Map();
+    const ids = within ? within.map(m => m.id) : null;
+    const iter = ids ? ids.map(id => [id, this.tags.get(id)]) : [...this.tags.entries()];
+    for (const [mid, set] of iter) {
+      if (!set) continue;
+      const m = this.media.get(mid);
+      if (!m || m.deleted) continue;
+      for (const k of set) counts.set(k, (counts.get(k) || 0) + 1);
+    }
+    return [...counts].map(([key, count]) => ({ key, name: this.tagNames.get(key) || key, count }))
+      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+  }
+
+  mediaTags(mid) {
+    return [...(this.tags.get(mid) || [])].map(k => this.tagNames.get(k) || k).sort((a, b) => a.localeCompare(b));
   }
 
   links() {
@@ -268,6 +322,11 @@ export class Archive {
 
   newId() { return randHex(12); }
 }
+
+export function cleanTag(t) {
+  return String(t || '').replace(/^#+/, '').replace(/\s+/g, ' ').trim().slice(0, 40);
+}
+export function tagKey(t) { return cleanTag(t).toLowerCase(); }
 
 function cmpOp(a, b) {
   return (a.ts - b.ts) || (a.dev < b.dev ? -1 : a.dev > b.dev ? 1 : 0) || (a.seq - b.seq);
