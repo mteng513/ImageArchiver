@@ -6,7 +6,7 @@ import { toast, sheet, askText, confirmBox, pickGallery, createGallery, progress
 import { tagKey, cleanTag } from './log.js';
 import { openViewer, labelFor } from './viewer.js';
 
-const VERSION = '0.3.0';
+const VERSION = '0.3.1';
 const app = $('#app');
 const ui = {
   tab: 'capture',

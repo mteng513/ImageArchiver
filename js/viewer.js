@@ -3,7 +3,7 @@ import { h, icon, idb, fmtDate, fmtBytes } from './util.js';
 import { S, urls, deleteMedia } from './core.js';
 import { sheet, toast, confirmBox, pickGallery, editTags } from './ui.js';
 
-const DEFAULTS = { interval: 5, loop: true, shuffle: false, transition: 'fade' };
+const DEFAULTS = { interval: 5, loop: true, shuffle: false, reverse: false, transition: 'fade' };
 
 export async function openViewer(list, start = 0, { viewKey = 'all', autoplay = false } = {}) {
   if (!list.length) return;
@@ -12,6 +12,9 @@ export async function openViewer(list, start = 0, { viewKey = 'all', autoplay = 
 
   let order = list.map((_, i) => i);
   let pos = start;
+  // Reverse slideshow started from a grid's Play button begins at the last image.
+  if (autoplay && settings.reverse && !settings.shuffle && start === 0) pos = list.length - 1;
+  const step = () => (playing && settings.reverse && !settings.shuffle ? -1 : 1);
   let playing = false, timer = null, wake = null;
   let fill = false;
   let zoom = { s: 1, x: 0, y: 0 };
@@ -78,7 +81,7 @@ export async function openViewer(list, start = 0, { viewKey = 'all', autoplay = 
     const tags = S.archive.mediaTags(m.id).map(t => '#' + t).join(' ');
     caption.textContent = [host || labelFor(p), fmtDate(p.savedAt), tags].filter(Boolean).join(' · ');
     // Preload the next two full images.
-    for (const o of [1, 2]) { const n = at(pos + o); if (n) urls.orig(n).catch(() => {}); }
+    for (const o of [1, 2]) { const n = at(pos + o * step()); if (n) urls.orig(n).catch(() => {}); }
   }
 
   function go(delta, { animate = 'slide' } = {}) {
@@ -110,7 +113,7 @@ export async function openViewer(list, start = 0, { viewKey = 'all', autoplay = 
     clearTimeout(timer);
     if (!playing) return;
     timer = setTimeout(() => {
-      if (go(1, { animate: settings.transition === 'slide' ? 'slide' : 'fade' })) schedule();
+      if (go(step(), { animate: settings.transition === 'slide' ? 'slide' : 'fade' })) schedule();
     }, settings.interval * 1000);
   }
   async function play() {
@@ -120,6 +123,11 @@ export async function openViewer(list, start = 0, { viewKey = 'all', autoplay = 
       for (let i = rest.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [rest[i], rest[j]] = [rest[j], rest[i]]; }
       order = [curIdx, ...rest];
       pos = 0;
+    }
+    else if (!settings.loop) {
+      // Without looping, start from the end the slideshow moves away from.
+      if (settings.reverse && pos === 0) pos = order.length - 1;
+      else if (!settings.reverse && pos === order.length - 1) pos = 0;
     }
     playing = true;
     setChrome(false);
@@ -307,9 +315,16 @@ export async function openViewer(list, start = 0, { viewKey = 'all', autoplay = 
           settings.transition = t; save();
           [...seg.children].forEach(b => b.classList.toggle('on', b === e.currentTarget));
         } }, t === 'fade' ? 'Fade' : 'Slide')));
+      const dir = h('div', { class: 'seg' }, ...[[false, 'Forward'], [true, 'Reverse']].map(([v, t]) => h('button', {
+        class: settings.reverse === v ? 'on' : '', onclick: e => {
+          settings.reverse = v; save();
+          [...dir.children].forEach(b => b.classList.toggle('on', b === e.currentTarget));
+        } }, t)));
       return [
         h('div', { class: 'row-between' }, h('span', null, 'Interval'), val), range,
         toggle('loop', 'Loop'), toggle('shuffle', 'Shuffle'),
+        h('div', { class: 'row-between' }, h('span', null, 'Direction'), dir),
+        h('p', { class: 'muted tiny' }, 'Reverse plays from the last image back to the first, without changing the gallery\u2019s order. Shuffle ignores direction.'),
         h('div', { class: 'row-between' }, h('span', null, 'Transition'), seg),
         h('button', { class: 'btn primary block', onclick: () => { document.querySelector('.sheet-back')?.click(); play(); } }, icon('play', 18), ' Play'),
       ];
