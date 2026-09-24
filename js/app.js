@@ -6,7 +6,7 @@ import { toast, sheet, askText, confirmBox, pickGallery, createGallery, progress
 import { tagKey, cleanTag } from './log.js';
 import { openViewer, labelFor } from './viewer.js';
 
-const VERSION = '0.3.1';
+const VERSION = '0.3.3';
 const app = $('#app');
 const ui = {
   tab: 'capture',
@@ -259,6 +259,10 @@ const io = 'IntersectionObserver' in window ? new IntersectionObserver(entries =
 function thumbEl(m, cls = 'thumb') {
   const el = h('div', { class: cls });
   el._m = m;
+  if (m.w && m.h && m.h / m.w > 2) {
+    el.classList.add('tall');
+    if (cls === 'cell') el.append(h('span', { class: 'badge strip-badge', 'aria-label': 'Long image' }, icon('tall', 14)));
+  }
   if (io) io.observe(el); else urls.thumb(m).then(u => { el.style.backgroundImage = `url("${u}")`; });
   return el;
 }
@@ -772,7 +776,7 @@ function captureView() {
 
   const pasteBtn = h('button', { class: 'paste-btn', onclick: () => pasteFromClipboard() },
     icon('clip', 34), h('span', { class: 'big' }, 'Paste'),
-    h('span', { class: 'small' }, 'Copy Image (or Copy Link) in Chrome, tap here, then tap the Paste bubble'));
+    h('span', { class: 'small' }, 'Copy Image in Chrome, tap here, then tap the Paste bubble. If nothing saves, use the box below.'));
 
   // Fallback: the system paste menu. Long-press the box and choose Paste.
   const zone = h('div', { class: 'paste-zone', contenteditable: 'true', inputmode: 'none', role: 'textbox',
@@ -849,8 +853,23 @@ async function pasteFromClipboard() {
       if (!text && it.types.includes(tt)) { try { text = (await (await it.getType(tt)).text()).trim().split(/\s+/)[0]; } catch {} }
     }
   }
-  logPaste({ via: 'button', msg: `types [${types.join(', ') || 'none'}]` });
+  const shape = items.length ? items.map((it, i) => `#${i + 1}: ${it.types.join(', ') || 'no types'}`).join('; ') : 'no items';
+  logPaste({ via: 'button', msg: `${items.length} item(s), ${shape}` });
+  if (!blobs.length && !isURL(text)) {
+    // iOS WebKit only hands the Paste button image/png (plus text/html/uri-list).
+    // Chrome's Copy Image of a JPEG/WebP/GIF comes through as nothing, so send
+    // the user to the paste box, which uses the system paste and sees more types.
+    setStatus('iOS didn’t give the button this image (it only passes PNGs). Long-press the dashed box below and tap Paste.');
+    nudgeZone();
+    return;
+  }
   await handleClip(blobs, text, types);
+}
+
+function nudgeZone() {
+  const z = $('.paste-zone'); if (!z) return;
+  z.classList.remove('nudge'); void z.offsetWidth; z.classList.add('nudge');
+  z.scrollIntoView({ block: 'center', behavior: 'smooth' });
 }
 
 // Paste events (the paste box, or a hardware keyboard).

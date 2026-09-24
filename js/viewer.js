@@ -19,6 +19,8 @@ export async function openViewer(list, start = 0, { viewKey = 'all', autoplay = 
   let fill = false;
   let zoom = { s: 1, x: 0, y: 0 };
   let chrome = true;
+  let stripWhole = false;          // double-tap on a strip shows it whole instead of fit-to-width
+  let flingRaf = 0, panTimer = null;
 
   const counter = h('span', { class: 'v-count' });
   const favBtn = h('button', { class: 'icon-btn', 'aria-label': 'Favorite', onclick: () => toggleFav() });
@@ -40,7 +42,8 @@ export async function openViewer(list, start = 0, { viewKey = 'all', autoplay = 
     return { el: s, img, id: null };
   });
   const stage = h('div', { class: 'v-stage' }, track);
-  const root = h('div', { class: 'viewer', role: 'dialog', 'aria-label': 'Image viewer' }, stage, top, caption);
+  const vbar = h('div', { class: 'v-bar' }, h('div'));
+  const root = h('div', { class: 'viewer', role: 'dialog', 'aria-label': 'Image viewer' }, stage, vbar, top, caption);
   document.body.append(root);
   document.body.classList.add('no-scroll');
   requestAnimationFrame(() => root.classList.add('in'));
@@ -53,19 +56,84 @@ export async function openViewer(list, start = 0, { viewKey = 'all', autoplay = 
   const wrapPos = p => { const n = order.length; return ((p % n) + n) % n; };
   const cur = () => list[order[pos]];
 
+  // ---- strips (long images): fit to width, pan vertically ----
+  const isTall = m => !!(m && m.w && m.h && m.h / m.w > (stage.clientHeight / stage.clientWidth) * 1.2);
+  const stripH = m => stage.clientWidth * m.h / m.w;
+  const minTy = slot => Math.min(0, stage.clientHeight - stripH(slot.m));
+  function layoutSlot(slot) {
+    const m = slot.m;
+    slot.tall = !!m && isTall(m) && !stripWhole;
+    slot.ty = 0;
+    slot.el.classList.toggle('tall', slot.tall);
+    slot.img.style.transition = '';
+    slot.img.style.transform = '';
+    slot.img.style.height = slot.tall ? stripH(m) + 'px' : '';
+    slot.img.classList.toggle('fill', fill && !slot.tall);
+    if (slot === slides[1]) updateBar();
+  }
+  function applyTy(slot) {
+    slot.img.style.transform = slot.ty ? `translateY(${slot.ty}px)` : '';
+    if (slot === slides[1]) updateBar();
+  }
+  function updateBar() {
+    const sl = slides[1], thumb = vbar.firstChild;
+    vbar.classList.toggle('on', !!sl.tall);
+    if (!sl.tall) return;
+    const H = stripH(sl.m);
+    thumb.style.transition = sl.img.style.transition.replace('transform', 'top');
+    thumb.style.height = (stage.clientHeight / H * 100) + '%';
+    thumb.style.top = (-sl.ty / H * 100) + '%';
+  }
+  function stopMotion() {
+    cancelAnimationFrame(flingRaf); clearTimeout(panTimer);
+    const sl = slides[1];
+    if (sl.tall && sl.img.style.transition) {   // freeze a slideshow pan where it is
+      try { sl.ty = new DOMMatrix(getComputedStyle(sl.img).transform).m42; } catch {}
+      sl.img.style.transition = '';
+      applyTy(sl);
+    }
+  }
+  function fling(v) {   // v in px/ms
+    const sl = slides[1];
+    let last = performance.now();
+    const tick = now => {
+      const dt = now - last; last = now;
+      const want = sl.ty + v * dt;
+      const next = Math.max(minTy(sl), Math.min(0, want));
+      sl.ty = next; applyTy(sl);
+      v *= Math.pow(0.997, dt);
+      if (next === want && Math.abs(v) > 0.02) flingRaf = requestAnimationFrame(tick);
+    };
+    flingRaf = requestAnimationFrame(tick);
+  }
+  // Slideshow: a strip scrolls top to bottom (~2.5 s per screen) instead of sitting as a sliver.
+  const panMs = m => Math.max(settings.interval * 1000, (stripH(m) / stage.clientHeight) * 2500 + 2000);
+  function autoPan() {
+    const sl = slides[1];
+    if (!sl.tall) return;
+    const ms = panMs(sl.m) - 2000;
+    clearTimeout(panTimer);
+    panTimer = setTimeout(() => {
+      sl.img.style.transition = `transform ${ms}ms linear`;
+      sl.ty = minTy(sl); applyTy(sl);
+    }, 1000);
+  }
+
   function setImg(slot, m) {
     slot.id = m ? m.id : null;
-    slot.img.style.transform = '';
-    slot.img.classList.toggle('fill', fill);
+    slot.m = m;
+    layoutSlot(slot);
     if (!m) { slot.img.removeAttribute('src'); return; }
-    if (m.status === 'link-only') { slot.img.removeAttribute('src'); }
-    urls.thumb(m).then(u => { if (slot.id === m.id && !slot.full) slot.img.src = u; }).catch(() => {});
+    if (m.status === 'link-only' || isTall(m)) { slot.img.removeAttribute('src'); }
+    // A strip's thumbnail is only its top, so it waits for the full image.
+    if (!isTall(m)) urls.thumb(m).then(u => { if (slot.id === m.id && !slot.full) slot.img.src = u; }).catch(() => {});
     slot.full = false;
     urls.orig(m).then(u => { if (slot.id === m.id) { slot.img.src = u; slot.full = true; } })
       .catch(() => { if (slot.id === m.id) slot.el.classList.add('missing'); });
   }
 
   function render() {
+    cancelAnimationFrame(flingRaf); clearTimeout(panTimer);
     zoom = { s: 1, x: 0, y: 0 };
     track.style.transition = 'none';
     track.style.transform = 'translateX(0)';
@@ -82,6 +150,7 @@ export async function openViewer(list, start = 0, { viewKey = 'all', autoplay = 
     caption.textContent = [host || labelFor(p), fmtDate(p.savedAt), tags].filter(Boolean).join(' · ');
     // Preload the next two full images.
     for (const o of [1, 2]) { const n = at(pos + o * step()); if (n) urls.orig(n).catch(() => {}); }
+    if (playing) { schedule(); autoPan(); }
   }
 
   function go(delta, { animate = 'slide' } = {}) {
@@ -114,7 +183,7 @@ export async function openViewer(list, start = 0, { viewKey = 'all', autoplay = 
     if (!playing) return;
     timer = setTimeout(() => {
       if (go(step(), { animate: settings.transition === 'slide' ? 'slide' : 'fade' })) schedule();
-    }, settings.interval * 1000);
+    }, slides[1].tall ? panMs(slides[1].m) : settings.interval * 1000);
   }
   async function play() {
     if (settings.shuffle) {
@@ -163,11 +232,14 @@ export async function openViewer(list, start = 0, { viewKey = 'all', autoplay = 
 
   stage.addEventListener('touchstart', e => {
     if (e.touches.length === 2) {
+      if (slides[1].tall) return;   // strips: double-tap shows the whole image instead
       pinch = { d: dist(e.touches[0], e.touches[1]), s: zoom.s };
       t0 = null;
     } else if (e.touches.length === 1) {
       const t = e.touches[0];
-      t0 = { x: t.clientX, y: t.clientY, time: Date.now(), zx: zoom.x, zy: zoom.y, moved: false, axis: null };
+      stopMotion();
+      t0 = { x: t.clientX, y: t.clientY, time: Date.now(), zx: zoom.x, zy: zoom.y, moved: false, axis: null,
+        ty0: slides[1].ty || 0, samples: [] };
     }
   }, { passive: true });
 
@@ -184,12 +256,22 @@ export async function openViewer(list, start = 0, { viewKey = 'all', autoplay = 
     const dx = t.clientX - t0.x, dy = t.clientY - t0.y;
     if (Math.abs(dx) > 6 || Math.abs(dy) > 6) t0.moved = true;
     if (zoom.s > 1) { zoom.x = t0.zx + dx; zoom.y = t0.zy + dy; applyZoom(); return; }
-    if (!t0.axis && t0.moved) t0.axis = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
-    if (t0.axis === 'x') {
+    if (!t0.axis && t0.moved) {
+      t0.axis = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
+      // Pull down to close; on a strip only when it's already at the top.
+      t0.pull = t0.axis === 'y' && dy > 0 && (!slides[1].tall || t0.ty0 >= -1);
+    }
+    if (t0.axis === 'y' && !t0.pull && slides[1].tall) {
+      const sl = slides[1];
+      sl.ty = Math.max(minTy(sl), Math.min(0, t0.ty0 + dy)); applyTy(sl);
+      const now = performance.now();
+      t0.samples.push({ y: t.clientY, t: now });
+      while (t0.samples.length > 2 && now - t0.samples[0].t > 100) t0.samples.shift();
+    } else if (t0.axis === 'x') {
       dragging = true;
       track.style.transition = 'none';
       track.style.transform = `translateX(${dx}px)`;
-    } else if (t0.axis === 'y' && dy > 0) {
+    } else if (t0.pull && dy > 0) {
       root.style.setProperty('--pull', Math.min(1, dy / 300));
       track.style.transition = 'none';
       track.style.transform = `translateY(${dy}px)`;
@@ -212,6 +294,9 @@ export async function openViewer(list, start = 0, { viewKey = 'all', autoplay = 
       if (dx < -threshold) { go(1); if (playing) schedule(); }
       else if (dx > threshold) { go(-1); if (playing) schedule(); }
       else snapBack();
+    } else if (t0.axis === 'y' && !t0.pull && slides[1].tall) {
+      const sm = t0.samples, a = sm[0], b = sm[sm.length - 1];
+      if (a && b && b.t - a.t > 10 && performance.now() - b.t < 80) fling((b.y - a.y) / (b.t - a.t));
     } else if (t0.axis === 'y' && zoom.s === 1) {
       if (dy > 110) close(); else snapBack();
     } else if (!t0.moved) {
@@ -226,12 +311,13 @@ export async function openViewer(list, start = 0, { viewKey = 'all', autoplay = 
       clearTimeout(tapTimer);
       lastTap = 0;
       if (zoom.s > 1) { zoom = { s: 1, x: 0, y: 0 }; applyZoom(); }
+      else if (isTall(cur())) { stripWhole = !stripWhole; slides.forEach(layoutSlot); if (playing) { schedule(); autoPan(); } }
       else { fill = !fill; slides.forEach(s => s.img.classList.toggle('fill', fill)); }
       return;
     }
     lastTap = now;
     tapTimer = setTimeout(() => {
-      if (playing) { playing = false; clearTimeout(timer); try { wake?.release(); } catch {} wake = null; playBtn.replaceChildren(icon('play')); setChrome(true); toast('Paused'); }
+      if (playing) { playing = false; clearTimeout(timer); stopMotion(); try { wake?.release(); } catch {} wake = null; playBtn.replaceChildren(icon('play')); setChrome(true); toast('Paused'); }
       else if (!chrome) { setChrome(true); }
       else setChrome(false);
     }, 280);
@@ -246,6 +332,8 @@ export async function openViewer(list, start = 0, { viewKey = 'all', autoplay = 
     else if (e.key === ' ') { e.preventDefault(); playing ? stop() : play(); }
   };
   document.addEventListener('keydown', onKey);
+  const onResize = () => slides.forEach(layoutSlot);
+  window.addEventListener('resize', onResize);
 
   // ---- actions ----
   async function toggleFav() {
@@ -335,8 +423,10 @@ export async function openViewer(list, start = 0, { viewKey = 'all', autoplay = 
   function closeViewer() { close(); }
   function close() {
     clearTimeout(timer); playing = false;
+    cancelAnimationFrame(flingRaf); clearTimeout(panTimer);
     try { wake?.release(); } catch {}
     document.removeEventListener('keydown', onKey);
+    window.removeEventListener('resize', onResize);
     document.removeEventListener('visibilitychange', onVis);
     document.body.classList.remove('no-scroll');
     root.classList.remove('in');

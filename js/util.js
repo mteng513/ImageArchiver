@@ -136,6 +136,7 @@ const P = {
   sortDown: '<path d="M8 4v16M4.5 16.5L8 20l3.5-3.5M13 6h7M13 11h5M13 16h3"/>',
   sortUp: '<path d="M8 20V4M4.5 7.5L8 4l3.5 3.5M13 6h3M13 11h5M13 16h7"/>',
   arrange: '<rect x="4" y="4" width="6" height="6" rx="1.2"/><rect x="14" y="14" width="6" height="6" rx="1.2"/><path d="M14 7h3a2 2 0 012 2v1.5M17.5 9L19 10.5 20.5 9M10 17H7a2 2 0 01-2-2v-1.5M6.5 15L5 13.5 3.5 15"/>',
+  tall: '<rect x="7" y="2" width="10" height="20" rx="1.5"/><path d="M12 6v12M10 8l2-2 2 2M10 16l2 2 2-2"/>',
   video: '<rect x="3" y="6" width="13" height="12" rx="2"/><path d="M16 10l5-3v10l-5-3"/>',
 };
 export function icon(name, size = 22) {
