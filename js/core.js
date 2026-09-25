@@ -125,6 +125,9 @@ export async function saveImages(blobs, meta, onProgress) {
   const res = { saved: 0, dup: 0, full: 0, failed: 0, ids: [], errors: [] };
   let ops = [];
   const flushOps = async () => { if (ops.length) { await A.commit(ops); ops = []; } };
+  // Every image in one batch shares a save time and keeps its place (bi), so a
+  // folder import shows in folder order in both newest- and oldest-first views.
+  const batchAt = Date.now();
   for (let i = 0; i < blobs.length; i++) {
     onProgress && onProgress(i, blobs.length);
     try {
@@ -150,7 +153,7 @@ export async function saveImages(blobs, meta, onProgress) {
         source: meta.source || 'web', via: meta.via || null,
         sourceURL: meta.sourceURL || null, imageURL: meta.imageURL || null,
         pageTitle: null, author: null, caption: null, postedAt: null,
-        savedAt: Date.now(), status: 'ready',
+        savedAt: batchAt, bi: i, status: 'ready',
         media: [{ id: mid, orig, thumb, hash: img.hash, w: img.w, h: img.h,
           size: img.bytes.length, osize: encOrig.length, tsize: encThumb.length, type: img.type }],
       });

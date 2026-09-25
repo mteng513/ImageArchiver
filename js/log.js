@@ -271,7 +271,7 @@ export class Archive {
     for (const p of this.posts.values()) p.media.forEach((id, i) => idx.set(id, i));
     out.sort((a, b) => {
       const pa = this.posts.get(a.postId), pb = this.posts.get(b.postId);
-      return (pb.savedAt - pa.savedAt) || (idx.get(a.id) - idx.get(b.id));
+      return (pb.savedAt - pa.savedAt) || ((pa.bi || 0) - (pb.bi || 0)) || (idx.get(a.id) - idx.get(b.id));
     });
     return (this._sorted = out);
   }

@@ -6,7 +6,7 @@ import { toast, sheet, askText, confirmBox, pickGallery, createGallery, progress
 import { tagKey, cleanTag } from './log.js';
 import { openViewer, labelFor } from './viewer.js';
 
-const VERSION = '0.3.3';
+const VERSION = '0.3.4';
 const app = $('#app');
 const ui = {
   tab: 'capture',
@@ -390,7 +390,7 @@ function gridView() {
   const mode = gid ? galleryMode(gid) : ui.sort;
   let list = A.list(top.filter);
   if (mode === 'custom') list = A.arranged(gid, list);
-  else if (mode === 'old') list = list.slice().reverse();
+  else if (mode === 'old') list = list.slice().sort((a, b) => A.posts.get(a.postId).savedAt - A.posts.get(b.postId).savedAt);
   const sel = ui.selecting;
   const back = () => { ui.libStack.pop(); ui.selecting = null; renderMain(); };
 
@@ -785,7 +785,8 @@ function captureView() {
   zone.addEventListener('input', () => rescueInsertedImages(zone));
 
   const file = h('input', { type: 'file', accept: 'image/*', multiple: true, hidden: true, onchange: async e => {
-    const files = [...e.target.files];
+    const byName = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+    const files = [...e.target.files].sort((a, b) => byName.compare(a.name, b.name));
     e.target.value = '';
     if (!files.length) return;
     bar.el.hidden = false;
