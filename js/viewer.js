@@ -370,6 +370,7 @@ export async function openViewer(list, start = 0, { viewKey = 'all', autoplay = 
       return [
         row('Saved', fmtDate(p.savedAt)),
         row('From', labelFor(p)),
+        p.pageTitle ? row(p.via === 'pdf' ? 'File' : 'Page', p.pageTitle) : null,
         p.author ? row('Author', p.author) : null,
         p.caption ? h('p', { class: 'caption' }, p.caption) : null,
         p.sourceURL ? h('div', { class: 'kv' }, h('span', { class: 'k' }, 'Source'), link(p.sourceURL, 'Open original')) : null,
@@ -442,5 +443,6 @@ export function labelFor(p) {
   if (!p) return '';
   if (p.via === 'paste') return 'Pasted';
   if (p.via === 'photos') return 'From Photos';
+  if (p.via === 'pdf') return 'From a PDF';
   return { x: 'X', instagram: 'Instagram', reddit: 'Reddit', web: 'Web', import: 'Imported' }[p.source] || p.source;
 }

@@ -267,3 +267,13 @@ details.more summary { color: var(--muted); font-size: 14px; cursor: pointer; }
 .link-btn.strong { background: var(--accent); color: var(--accent-ink); border-radius: 16px; padding: 6px 14px; margin-left: 4px; }
 .row.checked { color: var(--accent); font-weight: 600; }
 .row:disabled { opacity: .45; }
+
+/* ---- PDF import picker ---- */
+.pdf-pick .progress { margin: 18px 0; }
+.pdf-tools { padding: 0; margin: -4px 0 6px; }
+.pdf-grid { margin: 0 -18px; }
+.pdf-grid .cell { border: 0; padding: 0; color: inherit; font: inherit; }
+.pdf-dim { position: absolute; left: 4px; bottom: 4px; z-index: 1; font-size: 11px; padding: 1px 5px; border-radius: 6px; background: rgba(0,0,0,.6); color: #ddd; }
+.pdf-saved { position: absolute; left: 4px; top: 4px; z-index: 1; font-size: 11px; font-weight: 600; padding: 1px 6px; border-radius: 6px; background: var(--ok); color: #0b0b0d; }
+.pdf-foot { position: sticky; bottom: -18px; margin: 0 -18px -18px; padding: 4px 18px 18px; background: #1a1a1f; }
+.pdf-foot .btn:disabled { opacity: .5; }
