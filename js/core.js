@@ -119,7 +119,8 @@ function isFavoriteKey(k) {
   return false;
 }
 
-// blobs: array of Blob/File. meta: {via, source, sourceURL, imageURL, pageTitle, gallery, tags}
+// blobs: array of Blob/File (or functions returning one). meta: pageTitle may be one per blob.
+// meta: {via, source, sourceURL, imageURL, pageTitle, gallery, tags}
 export async function saveImages(blobs, meta, onProgress) {
   const A = S.archive;
   const res = { saved: 0, dup: 0, full: 0, failed: 0, ids: [], errors: [] };
@@ -131,7 +132,10 @@ export async function saveImages(blobs, meta, onProgress) {
   for (let i = 0; i < blobs.length; i++) {
     onProgress && onProgress(i, blobs.length);
     try {
-      const img = await processImage(blobs[i]);
+      // An item can be a function returning the blob, so big batches (PDF pages)
+      // are drawn one at a time instead of all held in memory at once.
+      const blob = typeof blobs[i] === 'function' ? await blobs[i]() : blobs[i];
+      const img = await processImage(blob);
       const existing = A.byHash.get(img.hash);
       if (existing) {
         res.dup++;
@@ -152,7 +156,7 @@ export async function saveImages(blobs, meta, onProgress) {
         op: 'post.add', id: pid,
         source: meta.source || 'web', via: meta.via || null,
         sourceURL: meta.sourceURL || null, imageURL: meta.imageURL || null,
-        pageTitle: meta.pageTitle || null, author: null, caption: null, postedAt: null,
+        pageTitle: (Array.isArray(meta.pageTitle) ? meta.pageTitle[i] : meta.pageTitle) || null, author: null, caption: null, postedAt: null,
         savedAt: batchAt, bi: i, status: 'ready',
         media: [{ id: mid, orig, thumb, hash: img.hash, w: img.w, h: img.h,
           size: img.bytes.length, osize: encOrig.length, tsize: encThumb.length, type: img.type }],

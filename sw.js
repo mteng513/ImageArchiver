@@ -1,8 +1,8 @@
 // App-shell cache. Only same-origin app files are cached; B2 requests and
 // decrypted images never pass through here.
-const VERSION = 'v0.3.6';
+const VERSION = 'v0.4.0';
 const SHELL = ['./', 'index.html', 'app.css', 'manifest.webmanifest',
-  'js/app.js', 'js/core.js', 'js/crypto.js', 'js/images.js', 'js/log.js', 'js/pdfimages.js', 'js/s3.js', 'js/store.js', 'js/ui.js', 'js/util.js', 'js/viewer.js',
+  'js/app.js', 'js/core.js', 'js/crypto.js', 'js/images.js', 'js/log.js', 'js/pdfpages.js', 'js/s3.js', 'js/store.js', 'js/ui.js', 'js/util.js', 'js/viewer.js',
   'icons/apple-touch-icon.png', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', e => {

@@ -5,7 +5,7 @@ import { Store, onStoreEvent, monthDownloads, cachePolicy } from './store.js';
 import { toast, sheet, askText, confirmBox, pickGallery, createGallery, progressBar, tagSheet, editTags } from './ui.js';
 import { tagKey, cleanTag } from './log.js';
 import { openViewer, labelFor } from './viewer.js';
-import { extractPdfImages, isPdf } from './pdfimages.js';
+import { isPdf, openPdf } from './pdfpages.js';
 
 const VERSION = '0.3.4';
 const app = $('#app');
@@ -815,7 +815,7 @@ function captureView() {
     zone,
     status,
     h('button', { class: 'btn block', onclick: () => file.click() }, icon('photos', 20), ' Import from Photos or Files'), file,
-    h('p', { class: 'muted tiny center' }, 'Choose Files also takes PDFs: you pick which of the images inside to keep.'),
+    h('p', { class: 'muted tiny center' }, 'Choose Files also takes PDFs: each page you pick is saved as one picture.'),
     bar.el,
     recent.length ? h('div', { class: 'section-head' }, h('h3', null, `Saved this session · ${recent.length}`)) : null,
     recent.length ? h('div', { class: 'strip' }, ...recent.slice(0, 24).map((m, i) => {
@@ -945,20 +945,23 @@ document.addEventListener('paste', e => {
 });
 
 // ---------------------------------------------------------------- PDF import
-// Reads the PDF on the phone, then shows its images to pick from. Small images
-// (under 300 px on the short side: icons, avatars, logos) start hidden, and
-// images already in the archive start unselected.
-const PDF_SMALL = 300;
+// Each page becomes one picture, drawn the way a PDF viewer shows it (text and
+// artwork included). The picker shows every page, all selected; full-size
+// pages are drawn one at a time while saving, to keep memory low on the phone.
 function importPdf(pdf) {
   const urls = [];
+  let doc = null, saving = false, closed = false;
+  const finish = () => { if (doc && !saving) { doc.close(); doc = null; } urls.forEach(u => URL.revokeObjectURL(u)); };
   return sheet(close => {
     const bar = progressBar();
-    bar.set(0, 0, 'Reading the PDF…');
+    bar.set(0, 0, 'Opening the PDF…');
     const body = h('div', { class: 'pdf-pick' }, bar.el);
-    extractPdfImages(pdf, (d, t) => bar.set(d, t, t ? `Reading image ${Math.min(d + 1, t)} of ${t}…` : 'Reading the PDF…'))
-      .then(r => {
-        for (const img of r.images) urls.push(img.url = URL.createObjectURL(img.blob));
-        body.replaceChildren(...pdfPicker(pdf, r, close).filter(Boolean));
+    openPdf(pdf, { askPassword: retry => askText({
+        title: retry ? 'Wrong password. Try again' : 'This PDF has a password', placeholder: 'Password', ok: 'Open' }) })
+      .then(d => {
+        doc = d;
+        if (closed) return finish();
+        body.replaceChildren(...pdfPicker(pdf, d, urls, close, v => { saving = v; if (!v && closed) finish(); }));
       })
       .catch(e => {
         console.error(e);
@@ -966,79 +969,67 @@ function importPdf(pdf) {
           h('button', { class: 'btn block', onclick: () => close() }, 'OK'));
       });
     return body;
-  }, { title: pdf.name || 'PDF', tall: true, onClose: () => setTimeout(() => urls.forEach(u => URL.revokeObjectURL(u)), 1000) });
+  }, { title: pdf.name || 'PDF', tall: true, onClose: () => { closed = true; finish(); } });
 }
 
-function pdfPicker(pdf, r, close) {
+function pdfPicker(pdf, doc, urls, close, setSaving) {
   const A = S.archive;
-  const imgs = r.images;
-  const isSmall = img => Math.min(img.w, img.h) < PDF_SMALL;
-  const nSmall = imgs.filter(isSmall).length;
-  const nSaved = imgs.filter(img => A.byHash.has(img.hash)).length;
-  let showSmall = nSmall === imgs.length;   // nothing but small ones: show them
-  const sel = new Set();
-  imgs.forEach((img, i) => { if ((showSmall || !isSmall(img)) && !A.byHash.has(img.hash)) sel.add(i); });
-  const visible = () => imgs.map((_, i) => i).filter(i => showSmall || !isSmall(imgs[i]));
-
-  const skippedNote = () => {
-    if (!r.skipped.length) return null;
-    const counts = new Map();
-    for (const s of r.skipped) counts.set(s.reason, (counts.get(s.reason) || 0) + 1);
-    return h('details', { class: 'more' }, h('summary', null, `${r.skipped.length} image${r.skipped.length === 1 ? '' : 's'} couldn’t be read`),
-      ...[...counts].map(([why, n]) => h('p', { class: 'muted small' }, `${n} × ${why}`)));
-  };
-  if (!imgs.length) {
-    return [h('p', { class: 'muted' }, r.skipped.length ? 'None of the images in this PDF could be read.' : 'This PDF has no images in it (only text or drawings).'),
-      skippedNote(), h('button', { class: 'btn block', onclick: () => close() }, 'OK')];
-  }
-
+  const n = doc.pages;
+  const sel = new Set(Array.from({ length: n }, (_, i) => i + 1));
   const gname = ui.gallery ? A.galleries.get(ui.gallery)?.name : 'Unsorted';
-  const info = h('p', { class: 'muted small' });
+  const name = (pdf.name || 'PDF').replace(/\.pdf$/i, '');
+  const info = h('p', { class: 'muted small' }, `${n} page${n === 1 ? '' : 's'} · each page is saved as one picture`);
   const tools = h('div', { class: 'row-between pdf-tools' });
   const grid = h('div', { class: 'grid pdf-grid' });
   const saveBtn = h('button', { class: 'btn primary block' });
   const foot = h('div', { class: 'pdf-foot' }, saveBtn);
 
+  const cells = [];
+  for (let p = 1; p <= n; p++) {
+    const cell = h('button', { class: 'cell pdf-page', 'aria-label': `Page ${p}`, onclick: () => { sel.has(p) ? sel.delete(p) : sel.add(p); draw(); } },
+      h('span', { class: 'pdf-dim' }, `p. ${p}`));
+    cells.push(cell);
+  }
   const draw = () => {
-    const vis = visible();
-    info.textContent = [
-      `${imgs.length} image${imgs.length === 1 ? '' : 's'}${r.pages ? ` on ${r.pages} page${r.pages === 1 ? '' : 's'}` : ''}`,
-      nSmall && !showSmall ? `${nSmall} small hidden` : '',
-      nSaved ? `${nSaved} already saved` : '',
-    ].filter(Boolean).join(' · ');
-    const allOn = vis.every(i => sel.has(i));
-    tools.replaceChildren(
-      h('button', { class: 'link-btn', onclick: () => { vis.forEach(i => allOn ? sel.delete(i) : sel.add(i)); draw(); } }, allOn ? 'Select none' : 'Select all'),
-      nSmall && nSmall < imgs.length ? h('button', { class: 'link-btn', onclick: () => {
-        showSmall = !showSmall;
-        if (!showSmall) imgs.forEach((img, i) => { if (isSmall(img)) sel.delete(i); });
-        draw();
-      } }, showSmall ? 'Hide small' : `Show small (${nSmall})`) : null);
-    grid.replaceChildren(...vis.map(i => {
-      const img = imgs[i];
-      const on = sel.has(i);
-      return h('button', { class: 'cell' + (on ? ' sel' : ''), style: { backgroundImage: `url("${img.url}")` },
-        'aria-pressed': String(on), 'aria-label': `Image ${i + 1}, ${img.w} by ${img.h}`,
-        onclick: () => { on ? sel.delete(i) : sel.add(i); draw(); } },
-        h('span', { class: 'pdf-dim' }, `${img.w}×${img.h}`),
-        A.byHash.has(img.hash) ? h('span', { class: 'pdf-saved' }, 'Saved') : null);
-    }));
+    const allOn = sel.size === n;
+    tools.replaceChildren(h('button', { class: 'link-btn', onclick: () => {
+      if (allOn) sel.clear(); else for (let p = 1; p <= n; p++) sel.add(p);
+      draw();
+    } }, allOn ? 'Select none' : 'Select all'));
+    cells.forEach((c, i) => { const on = sel.has(i + 1); c.classList.toggle('sel', on); c.setAttribute('aria-pressed', String(on)); });
     saveBtn.disabled = !sel.size;
-    saveBtn.textContent = sel.size ? `Save ${sel.size} to ${gname}` : 'Tap images to pick them';
+    saveBtn.textContent = sel.size ? `Save ${sel.size} page${sel.size === 1 ? '' : 's'} to ${gname}` : 'Tap pages to pick them';
   };
+  grid.replaceChildren(...cells);
+
+  // Page previews, drawn one after another.
+  let stopThumbs = false;
+  (async () => {
+    for (let p = 1; p <= n && !stopThumbs; p++) {
+      try {
+        const url = await doc.thumb(p);
+        urls.push(url);
+        cells[p - 1].style.backgroundImage = `url("${url}")`;
+      } catch (e) { console.error(e); cells[p - 1].classList.add('broken'); }
+    }
+  })();
 
   saveBtn.onclick = async () => {
-    const picked = [...sel].sort((a, b) => a - b).map(i => imgs[i].blob);
-    if (!picked.length) return;
+    const pages = [...sel].sort((a, b) => a - b);
+    if (!pages.length) return;
+    stopThumbs = true;
+    setSaving(true);
     const pb = progressBar();
     foot.replaceChildren(pb.el);
-    const res = await saveImages(picked, { via: 'pdf', source: 'import', pageTitle: pdf.name || null, gallery: ui.gallery || null, tags: ui.capTags },
-      (d, t) => pb.set(d, t, `Saving ${Math.min(d + 1, t)} of ${t}…`));
+    const res = await saveImages(pages.map(p => () => doc.render(p)),
+      { via: 'pdf', source: 'import', pageTitle: pages.map(p => n > 1 ? `${name} · p. ${p}` : name), gallery: ui.gallery || null, tags: ui.capTags },
+      (d, t) => pb.set(d, t, `Saving page ${pages[Math.min(d, t - 1)]} (${Math.min(d + 1, t)} of ${t})…`));
+    setSaving(false);
     close(true);
     reportSave(res);
   };
   draw();
-  return [info, tools, grid, skippedNote(), foot];
+  return [info, tools, grid, foot];
 }
 
 function reportSave(res, fromPhotos = false) {
